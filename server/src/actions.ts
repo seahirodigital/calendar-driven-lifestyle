@@ -22,6 +22,7 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { asc, eq, inArray, lt } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
+import { privileged } from "@space/privileged";
 import * as schema from "./schema";
 
 /* ================= Adopter configuration =================
@@ -78,7 +79,7 @@ function mondayOf(value: string): string {
   return addDays(value, delta);
 }
 
-/* ---------------- Optional adopter seed ---------------- */
+/* ---------------- Handed-off seed (exact supplied facts) ---------------- */
 
 type SeedCandidate = {
   name: string;
@@ -101,11 +102,14 @@ type SeedSlot = {
   candidates: SeedCandidate[];
 };
 
-// Optional first-run seed. The public copy ships EMPTY: a fresh
-// install starts with no slots or candidates, and the first refresh
-// builds everything from the adopter's own calendar and research.
-// Adopters may add their own researched slots here in the SeedSlot
-// shape (Tabelog score >= 3.3 only); bootstrap inserts them once.
+// Researched in the parent chat (2026-11-14) against Tabelog. Only entries
+// with a confirmed Tabelog score >= 3.3 are included; entries whose score was
+// unconfirmed or came from another site are excluded by the Tabelog-only rule.
+// Only outings from the user's OWN primary calendar are seeded (correction
+// 2026-11-14): the first version also seeded family-calendar events
+// (11/15 ピアノ発表会/初台, 11/19 TOMOO/みなとみらい, 11/21 高田馬場スタジオ,
+// 11/23 大山イベント, 11/29 原画展/サンシャイン) — those are removed, and
+// bootstrap deletes any already-stored copies.
 const SEED: SeedSlot[] = [];
 
 /* ---------------- Refresh task ---------------- */
@@ -386,7 +390,7 @@ async function mirrorCafesToStationDb(ctx: Ctx): Promise<void> {
           mapUrl: c.mapUrl,
           locationType: resolveCafeLocationType(c),
           photoUrl: null,
-          sourceLabel: "既存の枠別調査から移行",
+          sourceLabel: "既存の枠別調査から移行（2026-11-14）",
           sourceUrl: null,
           note: c.note,
           rank: rank++,
@@ -402,7 +406,7 @@ async function mirrorCafesToStationDb(ctx: Ctx): Promise<void> {
       .values({
         station,
         registered: true,
-        sourceLabel: "既存の枠別調査から移行",
+        sourceLabel: "既存の枠別調査から移行（2026-11-14）",
         researchedAt: s.updatedAt,
       })
       .onConflictDoNothing({ target: schema.cafeStations.station });
@@ -418,7 +422,7 @@ async function mirrorCafesToStationDb(ctx: Ctx): Promise<void> {
         .update(schema.cafeStations)
         .set({
           researchedAt: s.updatedAt,
-          sourceLabel: "既存の枠別調査から移行",
+          sourceLabel: "既存の枠別調査から移行（2026-11-14）",
         })
         .where(eq(schema.cafeStations.station, station));
     }
@@ -476,7 +480,7 @@ async function seedCafeDatabase(ctx: Ctx): Promise<void> {
   }
   for (const [station, shops] of byStation) {
     // Continue ranks after any rows the station already has (e.g. the
-    // mirrored shops）, so seeded shops append
+    // mirrored shops at the home station), so seeded shops append
     // instead of colliding with existing ranks.
     const existing = await db
       .select({ rank: schema.stationCafes.rank })
@@ -535,7 +539,7 @@ async function ensureRegisteredCafeStations(ctx: Ctx): Promise<void> {
       .values({
         station,
         registered: true,
-        sourceLabel: "事前登録した行き先駅",
+        sourceLabel: "ユーザーが事前登録した行き先駅（2026-11-14）",
         researchedAt: null,
       })
       .onConflictDoNothing({ target: schema.cafeStations.station });
@@ -599,7 +603,7 @@ function inferCafeLocationType(c: {
 }): CafeLocationType {
   const t = `${c.name} ${c.address} ${c.note}`;
   // An explicit 改札外 (outside the gates) statement wins over facility
-  // names — e.g. a shop whose address says 「○○改札外2F」.
+  // names — e.g. エキュート上野 公園口店 is addressed 公園改札外2F.
   if (/改札外/.test(t)) return "outside";
   if (
     /改札内|駅構内|コンコース|エキナカ|駅ナカ|エチカ|エミオ|エキア|ショッピングパーク|エキュート|改札前/.test(
@@ -837,8 +841,7 @@ type SlotIdentity = {
  * even if their eventKeys differ (seed key vs calendar id) or the title was
  * re-typed (e.g. a shortened artist name) — matched by title containment or
  * by identical start time. Distinct same-day events (different titles AND
- * different start times, e.g. a 14:30 appointment vs a 19:00 class)
- * never match. */
+ * different start times, e.g. a 14:30 appointment vs a 19:00 class) never match. */
 function isSameEventSlot(a: SlotIdentity, b: SlotIdentity): boolean {
   if (a.date !== b.date || a.kind !== b.kind) return false;
   if (a.kind === "home") return true;
@@ -943,8 +946,8 @@ async function healStoredData(ctx: Ctx): Promise<void> {
     }
   }
 
-  // 0b) Home-area weekly no-repeat: inside one Mon–Sun app week,
-  // the home-area fallback slots must not propose the
+  // 0b) Home-area weekly no-repeat (user rule, 2026-11-14): inside one
+  // Mon–Sun app week, the home-area fallback slots must not propose the
   // same shop twice — meal and souvenir-sweets candidates share one pool.
   // The earliest day in the week keeps the shop; later duplicates are
   // removed (the next nightly research refills from other shops). A new
@@ -1106,7 +1109,7 @@ async function healStoredData(ctx: Ctx): Promise<void> {
     }
   }
 
-  // 4) Cap candidates per slot (15 meals / 3 sweets), preserving rank
+// 4) Cap candidates per slot (15 meals / 3 sweets), preserving rank
   // order — never re-sort by score, because rank encodes the
   // nearest-station-area-first ordering the research brief produces.
   // The meal target is 10+ per slot (user instruction, 2026-11-14); the
@@ -1357,11 +1360,522 @@ async function getSettings(ctx: Ctx): Promise<FoodSettings> {
   }
 }
 
-async function startRefresh(ctx: Ctx): Promise<boolean> {
-  const lastStart = await getMeta(ctx, "refresh_started_at");
-  if (lastStart) {
-    const age = Date.now() - new Date(lastStart).getTime();
-    if (age < 10 * 60 * 1000) return false; // a research task is already running
+/* ---------------- Photo completeness (completion rule) ---------------- */
+
+// PHOTO COMPLETENESS RULE (user instruction, 2026-11-17): inside the
+// window from TODAY through the SUNDAY OF NEXT WEEK (Asia/Tokyo,
+// rolling), EVERY displayed meal and sweets candidate must carry a real
+// photoUrl — that is the definition of "complete" for a refresh. A
+// candidate without a photo is never left for the next pass: the same
+// research pass re-fetches it (the shop's own Tabelog photo → another
+// real photo of the same shop → replace the candidate with another
+// qualifying shop that has a photo). Refresh completion is judged WITH
+// the missing-photo count: while it is above zero the window is
+// unfinished. The helpers below compute the gaps exactly the way
+// getSchedule displays candidates (hidden shops, shops rated <= 2.5,
+// and over-budget meals are excluded first — they are never shown, so
+// they never count as gaps).
+
+// The completeness window is the user's own definition (2026-11-17):
+// TODAY through the SUNDAY OF NEXT WEEK (Asia/Tokyo) — e.g. on
+// 2026-11-17 it ends 2026-11-29. It is NOT the wider 3-week research /
+// display window (monday + 20) the nightly refresh looks ahead into:
+// counting week-3 lookahead slots here made the gap counts include
+// slots the user never asked to be complete yet, so photoMissingCount
+// could never reach zero and every backfill pass was oversized.
+function photoWindow(): { from: string; to: string } {
+  const today = tokyoToday();
+  return { from: today, to: addDays(mondayOf(today), 13) };
+}
+
+type PhotoGap = {
+  slotDate: string;
+  slotTitle: string;
+  area: string;
+  name: string;
+  category: string;
+  tabelogUrl: string | null;
+};
+
+type BelowTargetSlot = {
+  slotDate: string;
+  slotTitle: string;
+  area: string;
+  mealCount: number;
+  sweetsCount: number;
+};
+
+async function photoCompletionState(
+  ctx: Ctx,
+): Promise<{ gaps: PhotoGap[]; belowTarget: BelowTargetSlot[] }> {
+  const db = ctx.db<typeof schema>();
+  const { from, to } = photoWindow();
+  const slotRows = (await db.select().from(schema.slots)).filter(
+    (s) => s.date >= from && s.date <= to,
+  );
+  const gaps: PhotoGap[] = [];
+  const belowTarget: BelowTargetSlot[] = [];
+  if (!slotRows.length) return { gaps, belowTarget };
+  const ids = slotRows.map((s) => s.id);
+  const candRows = await db
+    .select()
+    .from(schema.candidates)
+    .where(inArray(schema.candidates.slotId, ids));
+  const hiddenRows = await loadHidden(ctx);
+  const feedbackRows = await loadFeedback(ctx);
+  const settings = await getSettings(ctx);
+  const slotById = new Map(slotRows.map((s) => [s.id, s]));
+  const counts = new Map<number, { meal: number; sweets: number }>();
+  for (const c of candRows) {
+    if (matchesHidden(c, hiddenRows)) continue;
+    if (isLowRated(c, feedbackRows)) continue;
+    if (c.category === "meal" && isOverBudgetCandidate(c, settings.budgetYen)) {
+      continue;
+    }
+    const cnt = counts.get(c.slotId) ?? { meal: 0, sweets: 0 };
+    if (c.category === "sweets") cnt.sweets++;
+    else cnt.meal++;
+    counts.set(c.slotId, cnt);
+    if (!c.photoUrl) {
+      const slot = slotById.get(c.slotId);
+      gaps.push({
+        slotDate: slot?.date ?? "",
+        slotTitle: slot?.eventTitle ?? "",
+        area: slot?.area ?? "",
+        name: c.name,
+        category: c.category,
+        tabelogUrl: normalizeTabelogUrl(c.tabelogUrl),
+      });
+    }
+  }
+  for (const s of slotRows) {
+    const cnt = counts.get(s.id) ?? { meal: 0, sweets: 0 };
+    if (cnt.meal < 10 || (settings.sweetsEnabled && cnt.sweets < 3)) {
+      belowTarget.push({
+        slotDate: s.date,
+        slotTitle: s.eventTitle,
+        area: s.area,
+        mealCount: cnt.meal,
+        sweetsCount: cnt.sweets,
+      });
+    }
+  }
+  gaps.sort((a, b) => a.slotDate.localeCompare(b.slotDate));
+  belowTarget.sort((a, b) => a.slotDate.localeCompare(b.slotDate));
+  return { gaps, belowTarget };
+}
+
+/* ---------------- Script-side completion (zero agent tokens) ----------------
+ * Long-term operation rule (user instruction, 2026-11-17): everything
+ * that can be done by plain server code MUST be done by plain server
+ * code; agent tokens are spent only where judgement is required
+ * (choosing a replacement shop, first research of a new area). The
+ * helpers below are that script layer for photo completion:
+ *  - ensureWindowSlots: dates in the completeness window with no slot
+ *    at all get their home-area fallback slot row created by script
+ *    (deterministic eventKey `<date>-home`, as the agents use).
+ *  - scriptComplete: closes gaps from ALREADY-STORED verified data —
+ *    a missing photo/map/hours is copied from another stored row of
+ *    the SAME shop (a different week's slot, or the user's rating
+ *    history), and a below-target slot is refilled from the stored
+ *    pool of the same area (for the home area: other weeks' picks, never
+ *    repeating a shop inside the same Mon–Sun week). Every value
+ *    copied was verified on Tabelog when it was first stored; nothing
+ *    is invented, and hard rules (hidden / rated <= 2.5 / budget) are
+ *    re-checked on every copy.
+ *  - researchWorklist: the remaining gaps AFTER script completion,
+ *    as a compact delta (ids + missing field names only) — the only
+ *    data an agent task ever receives for a backfill.
+ * What script cannot do here: open a Tabelog page (no sanctioned
+ * server-side fetch channel — search snippets do not verify scores),
+ * so fetching a genuinely new photo or choosing a replacement shop
+ * stays with the agent, on the delta below. */
+
+/** Create home-area fallback slot rows for window dates that have no
+ * slot at all (getSchedule otherwise synthesizes a phantom slot that
+ * no save can target). Idempotent. */
+async function ensureWindowSlots(ctx: Ctx): Promise<number> {
+  const db = ctx.db<typeof schema>();
+  const { from, to } = photoWindow();
+  const rows = await db.select().from(schema.slots);
+  const have = new Set(rows.filter((s) => s.date >= from && s.date <= to).map((s) => s.date));
+  let created = 0;
+  for (let d = from; d <= to; d = addDays(d, 1)) {
+    if (have.has(d)) continue;
+    await db.insert(schema.slots).values({
+      date: d,
+      eventKey: `${d}-home`,
+      kind: "home",
+      eventTitle: `${ADOPTER_CONFIG.homeStation}周辺ランチ`,
+      eventStart: null,
+      eventEnd: null,
+      allDay: true,
+      location: "",
+      area: ADOPTER_CONFIG.homeAreaLabel,
+      status: "researching",
+    });
+    created++;
+  }
+  return created;
+}
+
+type ScriptCompleteResult = { filledFields: number; refilledCandidates: number };
+
+async function scriptComplete(ctx: Ctx): Promise<ScriptCompleteResult> {
+  const db = ctx.db<typeof schema>();
+  const { from, to } = photoWindow();
+  const settings = await getSettings(ctx);
+  const hiddenRows = await loadHidden(ctx);
+  const feedbackRows = await loadFeedback(ctx);
+  const slotRows = (await db.select().from(schema.slots)).filter(
+    (s) => s.date >= from && s.date <= to,
+  );
+  const slotById = new Map(slotRows.map((s) => [s.id, s]));
+  const allCands = await db.select().from(schema.candidates);
+  const isUsable = (c: { name: string; tabelogUrl: string | null; category: string; overBudget: boolean; priceLabel: string }) =>
+    !matchesHidden(c, hiddenRows) &&
+    !isLowRated(c, feedbackRows) &&
+    !(c.category === "meal" && isOverBudgetCandidate(c, settings.budgetYen));
+  let filledFields = 0;
+  let refilledCandidates = 0;
+
+  // (a) Field fill: donors are stored rows of the same shop anywhere
+  // in the database, plus the user's rating history (genre/photo were
+  // stored with each rating).
+  const donorByShop = new Map<string, (typeof allCands)[number]>();
+  for (const c of allCands) {
+    if (!c.photoUrl) continue;
+    const k = shopKey(c.name, c.tabelogUrl);
+    if (!donorByShop.has(k)) donorByShop.set(k, c);
+  }
+  const windowCands = allCands.filter((c) => slotById.has(c.slotId));
+  for (const c of windowCands) {
+    if (!isUsable(c)) continue;
+    const patch: Partial<{ photoUrl: string; mapUrl: string; hoursText: string; closedDays: string }> = {};
+    const donor = donorByShop.get(shopKey(c.name, c.tabelogUrl));
+    if (donor && donor.id !== c.id) {
+      if (!c.photoUrl && donor.photoUrl) patch.photoUrl = donor.photoUrl;
+      if (!c.mapUrl && donor.mapUrl) patch.mapUrl = donor.mapUrl;
+      if (!c.hoursText && donor.hoursText) patch.hoursText = donor.hoursText;
+      if (!c.closedDays && donor.closedDays) patch.closedDays = donor.closedDays;
+    }
+    if (!c.photoUrl && !patch.photoUrl) {
+      const fb = feedbackRows.find(
+        (f) => f.photoUrl && shopKey(f.shopName, f.tabelogUrl) === shopKey(c.name, c.tabelogUrl),
+      );
+      if (fb?.photoUrl) patch.photoUrl = fb.photoUrl;
+    }
+    if (Object.keys(patch).length) {
+      await db.update(schema.candidates).set(patch).where(eq(schema.candidates.id, c.id));
+      filledFields += Object.keys(patch).length;
+      Object.assign(c, patch);
+    }
+  }
+
+  // (b) Pool refill: below-target slots draw on stored candidates of
+  // the same area (home-area slots pool across weeks; event slots pool
+  // from slots with the identical area string, e.g. the same event last week).
+  const counts = new Map<number, { meal: number; sweets: number }>();
+  const inSlot = new Map<number, Set<string>>();
+  for (const c of windowCands) {
+    if (!isUsable(c)) continue;
+    const cnt = counts.get(c.slotId) ?? { meal: 0, sweets: 0 };
+    if (c.category === "sweets") cnt.sweets++;
+    else cnt.meal++;
+    counts.set(c.slotId, cnt);
+    const keys = inSlot.get(c.slotId) ?? new Set<string>();
+    keys.add(shopKey(c.name, c.tabelogUrl));
+    inSlot.set(c.slotId, keys);
+  }
+  // Home-area weekly no-repeat: shop keys already used per Mon–Sun week.
+  const ikeUsedByWeek = new Map<string, Set<string>>();
+  for (const c of windowCands) {
+    const slot = slotById.get(c.slotId);
+    if (!slot || slot.kind !== "home" || !isUsable(c)) continue;
+    const wk = mondayOf(slot.date);
+    const set = ikeUsedByWeek.get(wk) ?? new Set<string>();
+    set.add(shopKey(c.name, c.tabelogUrl));
+    ikeUsedByWeek.set(wk, set);
+  }
+  const allSlots = await db.select().from(schema.slots);
+  const anySlotById = new Map(allSlots.map((s) => [s.id, s]));
+  const poolByArea = new Map<string, (typeof allCands)[number][]>();
+  for (const c of allCands) {
+    if (!c.photoUrl || !isUsable(c)) continue;
+    const src = anySlotById.get(c.slotId);
+    if (!src) continue;
+    const areaKey = src.kind === "home" ? ADOPTER_CONFIG.homeAreaLabel : src.area;
+    const list = poolByArea.get(areaKey) ?? [];
+    list.push(c);
+    poolByArea.set(areaKey, list);
+  }
+  for (const slot of slotRows) {
+    const cnt = counts.get(slot.id) ?? { meal: 0, sweets: 0 };
+    const needMeal = Math.max(0, 10 - cnt.meal);
+    const needSweets = settings.sweetsEnabled ? Math.max(0, 3 - cnt.sweets) : 0;
+    if (!needMeal && !needSweets) continue;
+    const areaKey = slot.kind === "home" ? ADOPTER_CONFIG.homeAreaLabel : slot.area;
+    const pool = (poolByArea.get(areaKey) ?? [])
+      .slice()
+      .sort((a, b) => b.score - a.score);
+    const have = inSlot.get(slot.id) ?? new Set<string>();
+    const weekSet =
+      slot.kind === "home"
+        ? (ikeUsedByWeek.get(mondayOf(slot.date)) ?? new Set<string>())
+        : null;
+    let rank =
+      windowCands.filter((c) => c.slotId === slot.id).reduce((m, c) => Math.max(m, c.rank), -1) + 1;
+    const take = async (
+      category: "meal" | "sweets",
+      need: number,
+    ): Promise<number> => {
+      let added = 0;
+      const seen = new Set<string>();
+      for (const p of pool) {
+        if (added >= need) break;
+        if (p.category !== category) continue;
+        const k = shopKey(p.name, p.tabelogUrl);
+        if (have.has(k) || seen.has(k)) continue;
+        if (weekSet && weekSet.has(k)) continue;
+        seen.add(k);
+        await db.insert(schema.candidates).values({
+          slotId: slot.id,
+          category,
+          name: p.name,
+          genre: p.genre,
+          score: p.score,
+          priceLabel: p.priceLabel,
+          overBudget: false,
+          tabelogUrl: p.tabelogUrl,
+          mapUrl: p.mapUrl,
+          photoUrl: p.photoUrl,
+          note: p.note,
+          hoursText: p.hoursText,
+          closedDays: p.closedDays,
+          rank: rank++,
+        });
+        have.add(k);
+        if (weekSet) weekSet.add(k);
+        added++;
+      }
+      return added;
+    };
+    refilledCandidates += await take("meal", needMeal);
+    refilledCandidates += await take("sweets", needSweets);
+  }
+  return { filledFields, refilledCandidates };
+}
+
+type WorklistFieldGap = {
+  slotId: number;
+  candidateId: number;
+  slotDate: string;
+  slotTitle: string;
+  name: string;
+  category: string;
+  tabelogUrl: string | null;
+  missing: string[];
+};
+
+type WorklistRefill = {
+  slotId: number;
+  slotDate: string;
+  slotTitle: string;
+  area: string;
+  kind: string;
+  mealCount: number;
+  sweetsCount: number;
+  needMeals: number;
+  needSweets: number;
+  /** Home-area slots only: shop names already used in the same Mon–Sun week
+   * (the weekly no-repeat pool) — names only, so the agent never has
+   * to read the week's candidate lists. */
+  weekUsedNames: string[];
+};
+
+/** The delta an agent task works from: ONLY the candidates missing a
+ * field (with exactly which fields) and the slots below target (with
+ * how many of what they need). No complete slot, no complete
+ * candidate, and no full-schedule data is ever included. */
+async function researchWorklist(
+  ctx: Ctx,
+): Promise<{ fieldGaps: WorklistFieldGap[]; refills: WorklistRefill[] }> {
+  const db = ctx.db<typeof schema>();
+  const { from, to } = photoWindow();
+  const settings = await getSettings(ctx);
+  const hiddenRows = await loadHidden(ctx);
+  const feedbackRows = await loadFeedback(ctx);
+  const slotRows = (await db.select().from(schema.slots)).filter(
+    (s) => s.date >= from && s.date <= to,
+  );
+  const slotById = new Map(slotRows.map((s) => [s.id, s]));
+  const ids = slotRows.map((s) => s.id);
+  const candRows = ids.length
+    ? await db.select().from(schema.candidates).where(inArray(schema.candidates.slotId, ids))
+    : [];
+  const fieldGaps: WorklistFieldGap[] = [];
+  const counts = new Map<number, { meal: number; sweets: number }>();
+  const ikeNamesByWeek = new Map<string, string[]>();
+  for (const c of candRows) {
+    if (matchesHidden(c, hiddenRows)) continue;
+    if (isLowRated(c, feedbackRows)) continue;
+    if (c.category === "meal" && isOverBudgetCandidate(c, settings.budgetYen)) continue;
+    const slot = slotById.get(c.slotId);
+    if (!slot) continue;
+    const cnt = counts.get(c.slotId) ?? { meal: 0, sweets: 0 };
+    if (c.category === "sweets") cnt.sweets++;
+    else cnt.meal++;
+    counts.set(c.slotId, cnt);
+    if (slot.kind === "home") {
+      const wk = mondayOf(slot.date);
+      const names = ikeNamesByWeek.get(wk) ?? [];
+      names.push(c.name);
+      ikeNamesByWeek.set(wk, names);
+    }
+    if (!c.photoUrl) {
+      const missing = ["photoUrl"];
+      if (!c.mapUrl) missing.push("mapUrl");
+      if (!c.hoursText) missing.push("hoursText");
+      if (!c.closedDays) missing.push("closedDays");
+      fieldGaps.push({
+        slotId: slot.id,
+        candidateId: c.id,
+        slotDate: slot.date,
+        slotTitle: slot.eventTitle,
+        name: c.name,
+        category: c.category,
+        tabelogUrl: normalizeTabelogUrl(c.tabelogUrl),
+        missing,
+      });
+    }
+  }
+  const refills: WorklistRefill[] = [];
+  for (const s of slotRows) {
+    const cnt = counts.get(s.id) ?? { meal: 0, sweets: 0 };
+    const needMeals = Math.max(0, 10 - cnt.meal);
+    const needSweets = settings.sweetsEnabled ? Math.max(0, 3 - cnt.sweets) : 0;
+    if (!needMeals && !needSweets) continue;
+    refills.push({
+      slotId: s.id,
+      slotDate: s.date,
+      slotTitle: s.eventTitle,
+      area: s.area,
+      kind: s.kind,
+      mealCount: cnt.meal,
+      sweetsCount: cnt.sweets,
+      needMeals,
+      needSweets,
+      weekUsedNames:
+        s.kind === "home" ? (ikeNamesByWeek.get(mondayOf(s.date)) ?? []) : [],
+    });
+  }
+  fieldGaps.sort((a, b) => a.slotDate.localeCompare(b.slotDate));
+  refills.sort((a, b) => a.slotDate.localeCompare(b.slotDate));
+  return { fieldGaps, refills };
+}
+
+/** After any research save: if the window is still incomplete, chain
+ * the next backfill pass (startPhotoBackfill script-completes first
+ * and self-throttles while a task is running, so this never
+ * double-starts; the 5-minute watch re-drives it otherwise). A
+ * chaining failure never fails the save itself. */
+async function chainPhotoBackfill(ctx: Ctx): Promise<void> {
+  try {
+    const after = await photoCompletionState(ctx);
+    if (after.gaps.length || after.belowTarget.length) {
+      await startPhotoBackfill(ctx);
+    }
+  } catch {
+    // The watch tick retries the backfill every 5 minutes anyway.
+  }
+}
+
+/** The PHOTO COMPLETENESS brief block shared by the full refresh, the
+ * photo backfill, and the calendar-watch batch: the concrete gap list
+ * (these exact shops lack a photo right now) plus the slots below
+ * their candidate target. Empty string when the window is complete. */
+function photoCompletenessBlock(
+  state: { gaps: PhotoGap[]; belowTarget: BelowTargetSlot[] },
+  settings: FoodSettings,
+): string {
+  if (!state.gaps.length && !state.belowTarget.length) return "";
+  const lines: string[] = [
+    "PHOTO COMPLETENESS — COMPLETION RULE (user instruction, 2026-11-17): inside the window from today through the Sunday of next week, EVERY meal and sweets candidate must carry a real photoUrl; a refresh that leaves any candidate in that window without a photo is INCOMPLETE. Never defer a missing photo to the next pass — resolve it in THIS pass: (1) re-open the shop's Tabelog page and copy one of its shop/dish photo URLs (tblg.k-img.com) exactly; (2) if that fails, use another real photo OF THE SAME SHOP (its official website); (3) if no photo of the shop can be obtained at all, REPLACE the candidate with another qualifying shop (Tabelog >= 3.3, within the ¥" +
+      settings.budgetYen +
+      " budget, not hidden, not rated <= 2.5) that HAS a photo. When you re-save a slot to fix its photos, re-send its COMPLETE candidate list (saveCandidates replaces a slot's candidates wholesale): every kept candidate with its existing photoUrl/mapUrl/hoursText/closedDays preserved, the fixed candidates with their newly collected photoUrl, and any replacement in the same array position.",
+  ];
+  if (state.gaps.length) {
+    lines.push(
+      `Candidates CURRENTLY MISSING a photo (${state.gaps.length}) — every one of these must be fixed in this pass: ` +
+        state.gaps
+          .map(
+            (g) =>
+              `${g.slotDate} 「${g.slotTitle}」 ${g.name} (${g.category}${g.tabelogUrl ? `, ${g.tabelogUrl}` : ""})`,
+          )
+          .join("; "),
+    );
+  }
+  if (state.belowTarget.length) {
+    lines.push(
+      `Slots BELOW TARGET in the window — refill each to 10+ meal candidates (and ${settings.sweetsEnabled ? "3 sweets" : "sweets off"}) with photo-carrying, in-budget, Tabelog >= 3.3 shops: ` +
+        state.belowTarget
+          .map(
+            (s) =>
+              `${s.slotDate} 「${s.slotTitle}」 (${s.area}) — currently ${s.mealCount} meals / ${s.sweetsCount} sweets`,
+          )
+          .join("; "),
+    );
+  }
+  return lines.join("\n");
+}
+
+/* ---------------- Research-task starters ----------------
+ * Shared contract (fix, 2026-11-17): a *_started_at stamp is written
+ * ONLY after ctx.agent.spawnTask has actually accepted the task.
+ * The previous code stamped BEFORE spawning and swallowed spawn
+ * errors (`catch { return false }`), so one failed spawn poisoned
+ * the 10-minute cross-throttle, every retry reported started:false
+ * with no reason, and nothing ever re-drove the work — the backfill
+ * (and the 02:40 nightly refresh) silently never ran to completion.
+ * Now: a failed spawn records `spawn_last_error` in meta and returns
+ * its message in the result note, and no stamp is left behind, so
+ * the next trigger (manual call, the 5-minute watch tick, or the
+ * saveCandidates continuation) can retry immediately. */
+
+type StartResult = { started: boolean; note: string };
+
+async function noteSpawnError(
+  ctx: Ctx,
+  where: string,
+  e: unknown,
+): Promise<string> {
+  const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+  await setMeta(
+    ctx,
+    "spawn_last_error",
+    `${new Date().toISOString()} ${where}: ${msg}`,
+  );
+  return msg;
+}
+
+/** Age in minutes of a *_started_at meta stamp, or null when unset. */
+async function startStampAgeMin(
+  ctx: Ctx,
+  key: string,
+): Promise<number | null> {
+  const last = await getMeta(ctx, key);
+  if (!last) return null;
+  return (Date.now() - new Date(last).getTime()) / 60000;
+}
+
+async function startRefresh(ctx: Ctx): Promise<StartResult> {
+  const ageMin = await startStampAgeMin(ctx, "refresh_started_at");
+  if (ageMin != null && ageMin < 10) {
+    // a research task is already running
+    return {
+      started: false,
+      note: `throttled: a full refresh started ${Math.floor(ageMin)} min ago`,
+    };
   }
   const settings = await getSettings(ctx);
   const hidden = await loadHidden(ctx);
@@ -1380,14 +1894,53 @@ async function startRefresh(ctx: Ctx): Promise<boolean> {
   const today = tokyoToday();
   const start = mondayOf(today);
   const end = addDays(start, 20); // through Sunday of next week
-  await setMeta(ctx, "refresh_started_at", new Date().toISOString());
+  const photoState = await photoCompletionState(ctx);
+  const photoBlock = photoCompletenessBlock(photoState, settings);
+  // SKIP list (script-verified, long-term operation rule): slots in
+  // the window that are already complete — 10+ meals, 3 sweets when
+  // enabled, a photo on every displayed candidate — are never
+  // re-researched or re-saved, even by this legacy full refresh.
+  const skipLabels: string[] = [];
+  {
+    const winSlots = (await db.select().from(schema.slots)).filter(
+      (s) => s.date >= start && s.date <= end,
+    );
+    if (winSlots.length) {
+      const winCands = await db
+        .select()
+        .from(schema.candidates)
+        .where(inArray(schema.candidates.slotId, winSlots.map((s) => s.id)));
+      const per = new Map<number, { meal: number; sweets: number; photoMissing: number }>();
+      for (const c of winCands) {
+        if (matchesHidden(c, hidden)) continue;
+        if (isLowRated(c, feedback)) continue;
+        if (c.category === "meal" && isOverBudgetCandidate(c, settings.budgetYen)) continue;
+        const p = per.get(c.slotId) ?? { meal: 0, sweets: 0, photoMissing: 0 };
+        if (c.category === "sweets") p.sweets++;
+        else p.meal++;
+        if (!c.photoUrl) p.photoMissing++;
+        per.set(c.slotId, p);
+      }
+      for (const s of winSlots) {
+        const p = per.get(s.id) ?? { meal: 0, sweets: 0, photoMissing: 0 };
+        if (p.meal >= 10 && (!settings.sweetsEnabled || p.sweets >= 3) && p.photoMissing === 0) {
+          skipLabels.push(`${s.date} 「${s.eventTitle}」`);
+        }
+      }
+    }
+  }
   const message = [
-    "You are refreshing the data of this Muse web artifact (予定日程付近グルメ).",
+    "You are refreshing the data of the Muse web artifact `clander-driven-lifestyle` (予定日程付近グルメ).",
     "",
     "STEP 1 — Read the user's Google Calendar (use the google_calendar connector CLI). FIRST list the calendars (calendar_list.list) and select ONLY the connected account's own primary calendar (the one the account owns, marked as its primary calendar). Read events from " +
       `${start} to ${end} (Asia/Tokyo) from that calendar ONLY. NEVER read calendars owned by someone else that are merely shared with the account (for example a family member's shared calendar), Japanese-holiday calendars, or any other shared/subscribed calendar. Events that belong to other people are out of scope and must never become slots, even if they appear on a shared calendar. Keep OUTING events only: timed events that have a location, plus all-day events whose title names a place or outing (clinic, concert, exhibition, appointment outside home). IMPORTANT: an event whose TITLE itself contains a place word also counts as an outing even when it has no separate location field — use the place named in the title as its area (example: an event titled \"【定期】 ○○駅前クラス\" is an outing at the place named in its title; use that place as its area). A day may have MORE THAN ONE outing event (e.g. an afternoon appointment plus an evening class): create one slot per outing event and never drop or merge one. Skip pure reminders, dividends, release-date markers, holidays, TV/streaming/sports-viewing events with no outing, and events with no location whose title gives no place.`,
     "STEP 2 — For each outing event, determine the meal area. HIGHEST PRIORITY: a station name written in the event TITLE (e.g. 「○○クリニック　△△駅」 → nearest station △△駅, area △△駅周辺) — the user adds station names to titles, and they override the location field and any broader district. Next: the location field, then a place word in the title. NEAREST-STATION AREA FIRST (applies to EVERY slot whose nearest station is identified — from a title station, the location, or the area): research meal candidates in that station's OWN surrounding district first — for station X that district is the streets immediately around X itself, not a broader neighboring district — and put those picks at the FRONT of the slot's candidate list. Shops in ADJACENT districts are fallbacks only: use them when the station's own district yields too few Tabelog >= 3.3 shops, place them AFTER the station-district picks, and state each one's walking distance from the station in its note.",
     `STEP 3 — For every day in the window that has NO outing event, create one fallback slot around the configured home area: kind "home", eventTitle "${ADOPTER_CONFIG.homeStation}周辺ランチ", area "${ADOPTER_CONFIG.homeAreaLabel}". WEEKLY NO-REPEAT RULE (home-area slots): within one Monday–Sunday week, the home-area fallback slots must NEVER propose the same shop twice — meal candidates and souvenir-sweets candidates share one no-repeat pool, so each day of the week gets a completely different set of shops. A busy home area has plenty of Tabelog >= 3.3 restaurants, so build a distinct set of at least 10 in-budget meal candidates (plus sweets) for EVERY home-area day instead of reusing one list all week. A shop may be proposed again only in a LATER week. Shop identity is the Tabelog restaurant id in the URL plus the shop name. The server also enforces this on save (later duplicates inside the same week are dropped), so do not rely on repeats surviving.`,
+    ...(skipLabels.length
+      ? [
+          `SKIP LIST — ALREADY COMPLETE (script-verified before this pass): the following slots already have at least 10 meal candidates${settings.sweetsEnabled ? " and 3 sweets" : ""} with a photo on every candidate, and their calendar events are unchanged. Do NOT research them and do NOT include them in saveCandidates — re-saving a complete slot is exactly the waste this pass exists to avoid: ${skipLabels.join("; ")}. Research ONLY the slots that are NOT in this list.`,
+        ]
+      : []),
     ...(hidden.length
       ? [
           `HIDDEN SHOPS — NEVER PROPOSE (user instruction): the user hid these shops with the circled-! button on the candidate card; they are on a permanent exclusion list and must never be proposed again in ANY slot (Home or event slots, meals or sweets): ${hidden
@@ -1398,7 +1951,7 @@ async function startRefresh(ctx: Ctx): Promise<boolean> {
       : []),
     ...(feedback.length
       ? [
-          `USER FEEDBACK — the user's own ratings of shops they actually visited (user instruction, 2026-11-16; this is the feedback loop for candidate selection — the hard rules above do NOT change: Tabelog >= 3.3 only, the ¥${settings.budgetYen} budget cap, and the Home weekly no-repeat rule all still apply in full). Within those rules: (1) PRIORITIZE shops the user rated >= 4.0 — when such a shop qualifies for a slot's area, include it and place it at the FRONT of that slot's candidate list: ${feedback
+          `USER FEEDBACK — the user's own ratings of shops they actually visited (user instruction, 2026-11-16; this is the feedback loop for candidate selection — the hard rules above do NOT change: Tabelog >= 3.3 only, the ¥${settings.budgetYen} budget cap, and the Home-area weekly no-repeat rule all still apply in full). Within those rules: (1) PRIORITIZE shops the user rated >= 4.0 — when such a shop qualifies for a slot's area, include it and place it at the FRONT of that slot's candidate list: ${feedback
             .filter((f) => f.rating >= 4.0)
             .map((f) => `${f.shopName} ★${f.rating.toFixed(1)} (${f.tabelogUrl})${f.memo ? ` — user memo: 「${f.memo}」` : ""}`)
             .join("; ") || "(none yet)"}. (2) NEVER PROPOSE shops the user rated <= 2.5, in ANY slot, while that rating stands: ${feedback
@@ -1410,7 +1963,8 @@ async function startRefresh(ctx: Ctx): Promise<boolean> {
             .join("; ") || "(none yet)"}.`,
         ]
       : []),
-    `STEP 4 — For each slot, research meal candidates ON tabelog.com: open Tabelog search/list pages for the area, then open each restaurant's Tabelog page and read its Tabelog score there. For evening events (e.g. one starting at 19:00), research dinner options the user can reach BEFORE the event start instead of lunch, but apply the same rules. Include ONLY restaurants whose Tabelog score is >= 3.3 — never use Google or any other site's rating. Aim for AT LEAST 10 meal candidates per slot (10–12 is the target); include fewer only if fewer genuinely qualify WITHIN BUDGET (see the hard budget rule next) — never pad the list with over-budget or sub-3.3 shops. HARD BUDGET RULE (user instruction): the settings budget is ¥${settings.budgetYen}. NEVER include a restaurant whose Tabelog price range for the relevant meal (the lunch price range for lunch slots, the dinner price range for evening-event slots) does not fit within ¥${settings.budgetYen} — for example a shop listed at ¥6,000〜¥7,999 or ¥15,000〜¥19,999 must NOT be saved at all, not even with a flag. Exclude it and keep researching until the slot has 10+ in-budget candidates or the area is genuinely exhausted; the server also deletes over-budget shops on save and in its healing pass. Set overBudget to false for every candidate you save. The user's current food preferences (from the app settings) are: preferred genres ${settings.genres.join(", ") || "(none set)"}. Prefer the preferred genres first, then fill remaining places with other genres that qualify. Save meal candidates with category "meal". BUSINESS HOURS ARE MANDATORY (user instruction): for EVERY candidate (meals AND sweets), read the shop's Tabelog page and copy its business hours into hoursText EXACTLY as Tabelog shows them (e.g. "11:00～14:30／17:00～23:00", including lunch/dinner splits when shown) and its regular closing days into closedDays (e.g. "水曜日", "月曜・火曜", "不定休", "無休"). If the page does not state hours or closing days, send an empty string for that field — the UI then shows 営業時間 未確認. NEVER invent, round, or guess hours or closing days. The server cross-checks hoursText/closedDays against the slot's usage window (lunch window, or the hours before an evening event) and the weekday, and flags shops that may be closed — so accurate hours matter. ORDER MATTERS and the server preserves the array order you send as the display order: put the slot's own nearest-station-district candidates FIRST (Tabelog score descending within that group), then any adjacent-district fallbacks (score descending, walking distance from the station stated in the note). For slots with no station-district distinction, plain Tabelog score descending is the order. Re-saving a slot replaces its candidates wholesale, so a re-researched slot returns to its 10+ meal candidates — never accumulate duplicates. Copy each restaurant's tabelog.com URL exactly as shown in the browser. Also note the lunch price range as shown on Tabelog (priceLabel), the genre, and a short factual note (station distance — measured from the slot's nearest station when a title station exists, 百名店, closure info) only when the page states it. REFILLS: when a slot currently shows fewer than 10 meal candidates because shops were deleted by the user, dropped as over-budget, or dropped as same-week Home duplicates, research replacement shops for it (Tabelog >= 3.3, WITHIN the ¥${settings.budgetYen} budget, not on the hidden list, and — for Home slots — not already used by another Home slot in the same week). PHOTO THUMBNAIL (MANDATORY, user instruction 2026-11-15): for EVERY candidate (meals AND sweets), set photoUrl to a real photo OF THAT SHOP: open the shop's Tabelog page and copy the URL of one of its shop/dish photos shown on the page (the tblg.k-img.com image URL) EXACTLY as shown — never shorten, resize, or rewrite it. If the Tabelog page yields no usable photo, fall back to a real photo of the SAME shop from its official website. If that also fails, fall back to a real photo of the SAME GENRE (e.g. a hamburger dish photo from another Tabelog page) — the candidate still ships, but with a genre photo. NEVER leave photoUrl empty when any of these is reachable, NEVER invent or generate a photo URL, and NEVER reuse one shop's photo for a different shop (the genre fallback is the only exception, and it must be a real photo of the same kind of food). MAP LINK (MANDATORY, user instruction 2026-11-16): for EVERY candidate (meals AND sweets), also set mapUrl to the link destination of the map button on the shop's Tabelog page — the 「大きな地図を見る」 link shown together with the shop's address in the 店舗情報 section. Its href is the shop's own Tabelog map page, of the form https://tabelog.com/<area>/<subarea>/<restaurant-id>/dtlmap/. Copy that href EXACTLY as shown in the browser — tapping it in the app opens the shop's map directly, with no intermediate page. NEVER substitute the shop page URL itself, and NEVER build a Google Maps search URL instead: only the actual map-button link copied from the page counts. If the map link genuinely cannot be obtained for a shop, send mapUrl as null — the card then simply shows no 地図を見る link, which is correct; a substitute link pointing at the wrong place is not.`,
+    `STEP 4 — For each slot, research meal candidates ON tabelog.com: open Tabelog search/list pages for the area, then open each restaurant's Tabelog page and read its Tabelog score there. For evening events (e.g. one starting at 19:00), research dinner options the user can reach BEFORE the event start instead of lunch, but apply the same rules. Include ONLY restaurants whose Tabelog score is >= 3.3 — never use Google or any other site's rating. Aim for AT LEAST 10 meal candidates per slot (10–12 is the target); include fewer only if fewer genuinely qualify WITHIN BUDGET (see the hard budget rule next) — never pad the list with over-budget or sub-3.3 shops. HARD BUDGET RULE (user instruction): the settings budget is ¥${settings.budgetYen}. NEVER include a restaurant whose Tabelog price range for the relevant meal (the lunch price range for lunch slots, the dinner price range for evening-event slots) does not fit within ¥${settings.budgetYen} — for example a shop listed at ¥6,000〜¥7,999 or ¥15,000〜¥19,999 must NOT be saved at all, not even with a flag. Exclude it and keep researching until the slot has 10+ in-budget candidates or the area is genuinely exhausted; the server also deletes over-budget shops on save and in its healing pass. Set overBudget to false for every candidate you save. The user's current food preferences (from the app settings) are: preferred genres ${settings.genres.join(", ") || "(none set)"}. Prefer the preferred genres first, then fill remaining places with other genres that qualify. Save meal candidates with category "meal". BUSINESS HOURS ARE MANDATORY (user instruction): for EVERY candidate (meals AND sweets), read the shop's Tabelog page and copy its business hours into hoursText EXACTLY as Tabelog shows them (e.g. "11:00～14:30／17:00～23:00", including lunch/dinner splits when shown) and its regular closing days into closedDays (e.g. "水曜日", "月曜・火曜", "不定休", "無休"). If the page does not state hours or closing days, send an empty string for that field — the UI then shows 営業時間 未確認. NEVER invent, round, or guess hours or closing days. The server cross-checks hoursText/closedDays against the slot's usage window (lunch window, or the hours before an evening event) and the weekday, and flags shops that may be closed — so accurate hours matter. ORDER MATTERS and the server preserves the array order you send as the display order: put the slot's own nearest-station-district candidates FIRST (Tabelog score descending within that group), then any adjacent-district fallbacks (score descending, walking distance from the station stated in the note). For slots with no station-district distinction, plain Tabelog score descending is the order. Re-saving a slot replaces its candidates wholesale, so a re-researched slot returns to its 10+ meal candidates — never accumulate duplicates. Copy each restaurant's tabelog.com URL exactly as shown in the browser. Also note the lunch price range as shown on Tabelog (priceLabel), the genre, and a short factual note (station distance — measured from the slot's nearest station when a title station exists, 百名店, closure info) only when the page states it. REFILLS: when a slot currently shows fewer than 10 meal candidates because shops were deleted by the user, dropped as over-budget, or dropped as same-week Home duplicates, research replacement shops for it (Tabelog >= 3.3, WITHIN the ¥${settings.budgetYen} budget, not on the hidden list, and — for Home slots — not already used by another Home slot in the same week). PHOTO THUMBNAIL (MANDATORY, user instruction 2026-11-15): for EVERY candidate (meals AND sweets), set photoUrl to a real photo OF THAT SHOP: open the shop's Tabelog page and copy the URL of one of its shop/dish photos shown on the page (the tblg.k-img.com image URL) EXACTLY as shown — never shorten, resize, or rewrite it. If the Tabelog page yields no usable photo, fall back to a real photo of the SAME shop from its official website. If that also fails, fall back to a real photo of the SAME GENRE (e.g. a hamburger dish photo from another Tabelog page) — the candidate still ships, but with a genre photo. NEVER leave photoUrl empty when any of these is reachable, NEVER invent or generate a photo URL, and NEVER reuse one shop's photo for a different shop (the genre fallback is the only exception, and it must be a real photo of the same kind of food). MAP LINK (MANDATORY, user instruction 2026-11-16): for EVERY candidate (meals AND sweets), also set mapUrl to the link destination of the map button on the shop's Tabelog page — the 「大きな地図を見る」 link shown together with the shop's address in the 店舗情報 section. Its href is the shop's own Tabelog map page, of the form https://tabelog.com/<area>/<subarea>/<restaurant-id>/dtlmap/ (verified example: the ハンバーグ ウィル page's map button links to https://tabelog.com/tokyo/A1304/A130402/13041176/dtlmap/). Copy that href EXACTLY as shown in the browser — tapping it in the app opens the shop's map directly, with no intermediate page. NEVER substitute the shop page URL itself, and NEVER build a Google Maps search URL instead: only the actual map-button link copied from the page counts. If the map link genuinely cannot be obtained for a shop, send mapUrl as null — the card then simply shows no 地図を見る link, which is correct; a substitute link pointing at the wrong place is not. PHOTO COMPLETENESS IS A COMPLETION CONDITION (user instruction, 2026-11-17): within the window from today through the Sunday of next week, a candidate saved without a photo is an UNFINISHED save — see the PHOTO COMPLETENESS block in this brief; every candidate in that window must end up with a photo, by re-fetching it in this same pass, by another real photo of the same shop, or by replacing the candidate with another qualifying shop that has one.`,
+    ...(photoBlock ? [photoBlock] : []),
     "STEP 4B — Tabelog articles (MANDATORY — same priority as the meal candidates; a slot saved with an empty articles array is an INCOMPLETE save): for each slot, find 1–3 Tabelog articles （まとめ記事 / matome pages on tabelog.com) relevant to that slot's area and lunch (e.g. 「<area> ランチ まとめ」, 「<area> ハンバーグ 特集」) and save them in the slot's `articles` array. Copy each article's exact title as shown in the browser. URLs must be the JAPANESE tabelog.com form (see the URL rule in STEP 7). Only real Tabelog article pages you actually opened — never invent a title or URL.",
     `STEP 5 — Cafes near the station （駅周辺のカフェ） — STATION DATABASE FIRST (user instruction): cafes live in a per-station database and are researched ONCE per station, then reused forever. Stations ALREADY researched in the cafe database: ${knownCafeStations.length ? knownCafeStations.join(", ") : "(none yet)"}. For a slot whose nearest station is in that list, DO NOT research cafes and DO NOT send a cafes array for that slot (send cafes: [] — the server ignores it and serves the slot from the database). Stations REGISTERED but NOT YET researched (the user's pre-registered frequent destinations — fill these with TOP PRIORITY, before anything else in this step): ${pendingCafeStations.length ? pendingCafeStations.join(", ") : "(none)"}. For every OTHER slot station (a genuinely new destination), research it now so it joins the database. Research rules for a station being researched: BY BRAND around the station (the title station when present, else the station nearest the location/area; the configured home station for fallback slots): for EACH major chain brand — スターバックス, タリーズ, ドトール, カフェ・ド・クリエ, エクセルシオール カフェ, 喫茶室ルノアール, プロント, コメダ珈琲店, ベローチェ, サンマルクカフェ, and any other chain with a shop near that station — list EVERY shop of that brand within walking distance of the station. There is NO cafe cap: the same brand can have several usable shops around one station and the user picks by exact location, so include all of them. LOCATION CLASSIFICATION — 駅中/駅外 (user rule change, 2026-11-15; the old station-interior EXCLUSION is ABOLISHED): include EVERY cafe around the station, inside and outside alike, and classify each one. Set locationType to "inside" (駅中) when the shop is inside the ticket gates （改札内）, on the station concourse （コンコース内）, inside an エキナカ commercial facility, or inside a station-direct underground concourse (駅直結の地下街の中にある店舗). Set locationType to "outside" (駅外) for everything else — street-level shops AND shops inside station buildings (駅ビル such as ルミネ / アトレ count as 駅外). Judge from the shop's official store page / listing wording and keep that source on the row. When the location genuinely cannot be judged, OMIT locationType (the server then infers from name/address/note and otherwise stores 未判定) — never guess a shop into 駅外. Only when NO chain cafe exists near the station at all, add independent （個人経営） cafes instead. Verify each cafe actually exists at that station area (search the chain's official store locator or a map listing; do not guess a branch name). EXHAUSTIVENESS RULE (user instruction, 2026-11-15): for every chain brand, cross-check the shop count against the chain's OFFICIAL store search for that station area and list EVERY shop it returns — station-interior shops included, each classified 駅中 — never stop at the first few shops you happen to find. Reference rule: at a major hub station, the official store search for a single brand can return well over ten shops, split between 駅中 and 駅外 — ALL of them belong in the database; a pass that saved only the first few, or that dropped the 駅中 shops, is a research failure. EVERY cafe MUST have a map link: set mapUrl to a Google Maps search URL that pins the exact shop, built as https://www.google.com/maps/search/?api=1&query= + the shop name and station/area (URL-encoded), or the exact map URL shown in the browser. Also set locationType ("inside" = 駅中 / "outside" = 駅外, judged per the LOCATION CLASSIFICATION rule above; omit only when genuinely unjudgeable), chainName (the chain brand — the UI groups cafes into per-brand pulldowns by this EXACT string, so always use the canonical brand name: スターバックス / タリーズ (NEVER タリーズコーヒー) / ドトール / カフェ・ド・クリエ / エクセルシオール カフェ / 喫茶室ルノアール / プロント / コメダ珈琲店 — or "" for independent shops; the server also canonicalizes known variants on save), address when shown, photoUrl ONLY when an official store page or map listing shows a real photo of that shop and you copy its URL exactly (otherwise null — never invent or generate a photo), sourceLabel (where you verified it + today's date), sourceUrl (the exact page URL you verified on, copied verbatim, or null), and a short factual note (station exit / walking distance, seating or power/Wi-Fi info) only when a source states it. HOW TO SAVE researched stations: send them in the TOP-LEVEL stationCafes array of the saveCandidates call: [{ station, name, chainName, address, mapUrl, photoUrl, sourceLabel, sourceUrl, note, locationType }] — one entry per shop, grouped by station then brand. When a researched station belongs to a slot in this window, ALSO include its shops in that slot's cafes array (same objects, without station) so the slot itself is complete. A registered station you could not finish stays unresearched and will be retried first on the next refresh — never mark it done with invented shops. Cafes have no Tabelog score requirement — never invent a score for them.`,
     ...(settings.sweetsEnabled
@@ -1418,16 +1972,380 @@ async function startRefresh(ctx: Ctx): Promise<boolean> {
           `STEP 6 — Souvenir sweets （お土産）: the user buys sweets as souvenirs and cares most about ${settings.sweets.join(", ")}. For each slot, ALSO research up to 3 sweets shops near the slot's area ON tabelog.com (patisserie, chocolate shops, 和菓子 shops) whose Tabelog score is >= 3.3 and that are known for one of those preferred items (e.g. a famous モンブラン, a signature シュークリーム, a well-known チョコレート or どら焼き). Save them in the same slot's candidates array with category "sweets"; set genre to the shop type (e.g. 洋菓子, チョコレート, 和菓子）, priceLabel to the Tabelog price range if shown, overBudget false, hoursText and closedDays copied from the shop's Tabelog page exactly as shown (empty string when the page does not state them — never invent hours), photoUrl under the same photo rules as STEP 4 (the shop's own Tabelog photo first, then its official site, else a real same-genre photo — never an invented URL), mapUrl under the same MAP LINK rule as STEP 4 (the 「大きな地図を見る」 map-button link destination on the shop's Tabelog page, copied exactly; null only when it cannot be obtained — never a substitute URL), and note to name the signature preferred item the shop is known for (only when the page states it). If no qualifying sweets shop is found near an area, save none for that slot — never invent one.`,
         ]
       : []),
-    "STEP 7 — Save everything by invoking the artifact action `saveCandidates` on this artifact's slug (see space.json) with { slots: [...], stationCafes: [...] (the per-station cafe database entries from STEP 5), routes: [...] (STEP 8) }. Each slot: date (YYYY-MM-DD), eventKey (the Google Calendar event id if available, else `date + '-' + slugified title` — ALWAYS derive it the same way for the same event on every refresh, and never create a second slot for an event that already has one; the server merges by date+event identity as a backstop), kind ('event' or 'home'), eventTitle, eventStart/eventEnd (local ISO with +09:00, or null for all-day), allDay, location, area, candidates: [{ name, genre, score, priceLabel, overBudget (always false — over-budget shops are excluded, never saved), tabelogUrl, mapUrl (the map-button link destination from the shop's Tabelog page, copied exactly — see the MAP LINK rule in STEP 4; null only when unobtainable), photoUrl (real photo of that shop, copied exactly — see the PHOTO THUMBNAIL rule in STEP 4), note, hoursText, closedDays, category ('meal' or 'sweets') }], cafes: [{ name, chainName, address, mapUrl, note, locationType }], articles: [{ title, url }]. URL RULE (user instruction): every Tabelog URL — restaurant pages AND articles — must be the JAPANESE version: host tabelog.com (never s.tabelog.com) and NO locale path segment (strip /en/, /cn/, /tw/, /ko/ if the browser shows one). The server normalizes URLs on save as a backstop, but send the Japanese form yourself.",
-    `STEP 8 — Train routes from home (行き方): the user's home stations are ${ADOPTER_CONFIG.routeOriginStations.join(" and ")} (ADOPTER_CONFIG in server/src/actions.ts). Work PER DESTINATION STATION, not per slot: collect the distinct destination stations of this window's slots (plus any new station a future event implies). For each destination station that has no stored route yet (or whose stored route is older than about 3 months), research the route ONCE on a real route-search service （駅探 ekitan.com, Yahoo!路線情報, NAVITIME or Google Maps): compare ALL configured origins (including the short walk between them when a search treats them as one transfer) and adopt the cheaper / more reasonable plan — lowest IC fare first; on a tie, fewer transfers, then faster. Record ONLY values the search result actually shows: fareIcYen (the IC fare), durationMin (total minutes including transfer wait), transfers, and the legs in order [{ line, fromStation, toStation, stops, minutes, note }] (e.g. origin station → line A → transfer station, transfer to line B → destination station). If a fare or time cannot be confirmed, leave that field null — NEVER invent a fare, time, line, or stop count. Save routes in the same saveCandidates call as a top-level \`routes\` array: [{ destStation, originStation, fareIcYen, durationMin, transfers, sourceLabel (the service you used + the date checked), sourceUrl (the exact search-result page URL, copied verbatim), legs, note (why this origin won, e.g. the other origin's fare) }]. Routes already stored for a station are reused as-is — do not re-search or re-send them every refresh.`,
+    "STEP 7 — Save everything by invoking the artifact action `saveCandidates` on this artifact's slug (see space.json) with { slots: [...], stationCafes: [...] (the per-station cafe database entries from STEP 5), routes: [...] (STEP 8) }. Each slot: date (YYYY-MM-DD), eventKey (the Google Calendar event id if available, else `date + '-' + slugified title` — ALWAYS derive it the same way for the same event on every refresh, and never create a second slot for an event that already has one; the server merges by date+event identity as a backstop), kind ('event' or 'home'), eventTitle, eventStart/eventEnd (local ISO with +09:00, or null for all-day), allDay, location, area, candidates: [{ name, genre, score, priceLabel, overBudget (always false — over-budget shops are excluded, never saved), tabelogUrl, mapUrl (the map-button link destination from the shop's Tabelog page, copied exactly — see the MAP LINK rule in STEP 4; null only when unobtainable), photoUrl (real photo of that shop, copied exactly — see the PHOTO THUMBNAIL rule in STEP 4), note, hoursText, closedDays, category ('meal' or 'sweets') }], cafes: [{ name, chainName, address, mapUrl, note, locationType }], articles: [{ title, url }]. URL RULE (user instruction): every Tabelog URL — restaurant pages AND articles — must be the JAPANESE version: host tabelog.com (never s.tabelog.com) and NO locale path segment (strip /en/, /cn/, /tw/, /ko/ if the browser shows one). The server normalizes URLs on save as a backstop, but send the Japanese form yourself. Save ONLY the slots you actually researched in this pass — never include a SKIP LIST slot in saveCandidates.",
+    "STEP 8 — Train routes from home (行き方）: the user's home stations are the configured route origin stations (ADOPTER_CONFIG.routeOriginStations in server/src/actions.ts). Work PER DESTINATION STATION, not per slot: collect the distinct destination stations of this window's slots (plus any new station a future event implies). For each destination station that has no stored route yet (or whose stored route is older than about 3 months), research the route ONCE on a real route-search service （駅探 ekitan.com, Yahoo!路線情報, NAVITIME or Google Maps): compare ALL configured origins (including the short walk between them when a search treats them as one transfer) and adopt the cheaper / more reasonable plan — lowest IC fare first; on a tie, fewer transfers, then faster. Record ONLY values the search result actually shows: fareIcYen (the IC fare), durationMin (total minutes including transfer wait), transfers, and the legs in order [{ line, fromStation, toStation, stops, minutes, note }] (e.g. origin station → line A → transfer station, transfer to line B → destination station). If a fare or time cannot be confirmed, leave that field null — NEVER invent a fare, time, line, or stop count. Save routes in the same saveCandidates call as a top-level `routes` array: [{ destStation, originStation, fareIcYen, durationMin, transfers, sourceLabel (the service you used + the date checked), sourceUrl (the exact search-result page URL, copied verbatim), legs, note (why this origin won, e.g. the other origin's fare) }]. Routes already stored for a station are reused as-is — do not re-search or re-send them every refresh.",
     "If Tabelog cannot be reached for a slot, still save the slot with an empty candidates array so the UI shows an honest researching state. Do not invent scores, prices, or URLs.",
   ].join("\n");
   try {
     await ctx.agent.spawnTask(message, { expectsAction: "saveCandidates" });
-    return true;
-  } catch {
-    return false;
+  } catch (e) {
+    const msg = await noteSpawnError(ctx, "startRefresh", e);
+    return { started: false, note: `spawn failed: ${msg}` };
   }
+  await setMeta(ctx, "refresh_started_at", new Date().toISOString());
+  return { started: true, note: "refresh task started" };
+}
+
+/* ---------------- Photo backfill (targeted completion pass) ---------------- */
+
+/** Focused photo-completion pass (user instruction, 2026-11-17;
+ * script-first redesign, same day): the SCRIPT layer runs first —
+ * ensureWindowSlots creates any missing fallback slot rows and
+ * scriptComplete closes every gap that already-stored verified data
+ * can close (same-shop field copies, same-area pool refills), all
+ * with zero agent tokens. Only the gaps that genuinely need a Tabelog
+ * page opened (a photo never collected anywhere, a refill shop never
+ * stored) go to ONE agent task, and they go as a compact DELTA: the
+ * researchWorklist (candidate ids + exactly which fields are missing;
+ * slot ids + how many meals/sweets are needed). The agent saves ONLY
+ * the delta back through patchCandidates — it never reads the full
+ * schedule and never re-sends a complete candidate list. Cross-
+ * throttled against the full refresh and the calendar-watch batch so
+ * two research tasks never write at the same time, and re-driven by
+ * the 5-minute watch tick + save chaining until the window is
+ * complete. */
+async function startPhotoBackfill(ctx: Ctx): Promise<StartResult> {
+  await ensureWindowSlots(ctx);
+  const script = await scriptComplete(ctx);
+  const state = await photoCompletionState(ctx);
+  if (!state.gaps.length && !state.belowTarget.length) {
+    return {
+      started: false,
+      note:
+        `complete: no photo gaps, no below-target slots` +
+        (script.filledFields || script.refilledCandidates
+          ? ` (script closed ${script.filledFields} fields / ${script.refilledCandidates} refills from stored data; no agent task needed)`
+          : ""),
+    };
+  }
+  for (const key of [
+    "photo_backfill_started_at",
+    "refresh_started_at",
+    "slot_batch_started_at",
+  ]) {
+    const ageMin = await startStampAgeMin(ctx, key);
+    if (ageMin != null && ageMin < 10) {
+      return {
+        started: false,
+        note: `throttled: ${key} is ${Math.floor(ageMin)} min old (a research task is already running)`,
+      };
+    }
+  }
+  const settings = await getSettings(ctx);
+  const hidden = await loadHidden(ctx);
+  const feedback = await loadFeedback(ctx);
+  const work = await researchWorklist(ctx);
+  const fixLines = work.fieldGaps.map(
+    (g) =>
+      `FIX candidateId=${g.candidateId} slotId=${g.slotId} ${g.slotDate} 「${g.slotTitle}」 ${g.name} (${g.category}${g.tabelogUrl ? `, ${g.tabelogUrl}` : ""}) missing: ${g.missing.join(", ")}`,
+  );
+  const refillLines = work.refills.map(
+    (r) =>
+      `REFILL slotId=${r.slotId} ${r.slotDate} 「${r.slotTitle}」 (${r.area}) — has ${r.mealCount} meals / ${r.sweetsCount} sweets, needs ${r.needMeals} more meals${r.needSweets ? ` and ${r.needSweets} more sweets` : ""}${r.weekUsedNames.length ? `. Shops already used in this home-area week (NEVER repeat any of these): ${r.weekUsedNames.join(", ")}` : ""}`,
+  );
+  const message = [
+    "You are completing the photo coverage of the Muse web artifact `clander-driven-lifestyle` (予定日程付近グルメ). This is a TARGETED, DELTA-ONLY pass. The server script has already closed every gap that stored data could close; what remains is listed below and is ALL you work on. Do NOT research anything else, do NOT read the full schedule (never call getSchedule — if you need the current worklist again, call the artifact action `getBackfillWorklist`, which returns this same delta and nothing else), and do NOT touch any slot or shop that is not listed.",
+    "WORKLIST (complete — every line is one job):",
+    ...fixLines,
+    ...refillLines,
+    "HOW TO WORK A FIX LINE: open ONLY that shop's Tabelog page and collect exactly the fields named in its `missing:` list — photoUrl: one of the shop's own shop/dish photo URLs (tblg.k-img.com) copied exactly (fallbacks in order: the same shop's official-site photo, then a real same-genre photo; never invent a URL); mapUrl: the link destination of the 「大きな地図を見る」 map button on the shop's Tabelog page (its …/<restaurant-id>/dtlmap/ page), copied exactly, never a substitute URL; hoursText/closedDays: copied exactly as the page shows them (leave a field out of your patch when the page does not state it — never invent hours). If a shop's photo genuinely cannot be obtained from any of those sources, REPLACE that candidate: send a replacement (below) with another qualifying shop for the same slot and category that HAS a photo.",
+    "HOW TO WORK A REFILL LINE: research ONLY the stated number of NEW shops for that slot's area on tabelog.com (open each shop's Tabelog page and read its score there; Tabelog >= 3.3 only, never another site's rating; the shop's Tabelog price range for the relevant meal must fit the ¥" +
+      settings.budgetYen +
+      " budget; preferred genres first: " +
+      (settings.genres.join(", ") || "(none set)") +
+      (settings.sweetsEnabled
+        ? `; sweets are souvenir shops known for ${settings.sweets.join(", ")}`
+        : "") +
+      "). Collect each new shop's photoUrl, mapUrl, hoursText and closedDays under the same rules as FIX lines.",
+    `HOW TO SAVE — DELTA ONLY: invoke the artifact action \`patchCandidates\` on slug \`clander-driven-lifestyle\` with { updates: [...], additions: [...], replacements: [...] }. Save each item AS SOON AS you finish it (one patchCandidates call per item is fine and preferred — progress must persist even if you stop early; a follow-up pass is started automatically for anything left over). updates: one entry per FIX line: { candidateId (from the line), photoUrl?, mapUrl?, hoursText?, closedDays? } — include ONLY the fields you actually collected; omitted fields are left untouched. additions: one entry per new REFILL shop: { slotId (from the line), candidate: { name, genre, score, priceLabel, overBudget: false, tabelogUrl, mapUrl, photoUrl, note, hoursText, closedDays, category ("meal" or "sweets") } } — a candidate without a photoUrl is rejected by the server. replacements: one entry per FIX line whose photo could not be obtained: { candidateId (from the line), candidate: { …same fields as an addition, same category as the replaced candidate } }. NEVER use saveCandidates in this pass and never re-send a slot's existing candidates — the patch applies only your delta on the server.`,
+    ...(hidden.length
+      ? [
+          `HIDDEN SHOPS — NEVER PROPOSE (permanent exclusion list, names only — the server also drops them on save): ${hidden
+            .slice(0, 100)
+            .map((h) => h.name)
+            .join(", ")}.`,
+        ]
+      : []),
+    ...(feedback.length
+      ? [
+          `USER FEEDBACK: shops rated >= 4.0 are prioritized as refills/replacements (${feedback
+            .filter((f) => f.rating >= 4.0)
+            .map((f) => `${f.shopName} ★${f.rating.toFixed(1)}`)
+            .join("; ") || "none"}); shops rated <= 2.5 are NEVER proposed (${feedback
+            .filter((f) => f.rating <= 2.5)
+            .map((f) => `${f.shopName} ★${f.rating.toFixed(1)}`)
+            .join("; ") || "none"}).`,
+        ]
+      : []),
+    "URL RULE: every Tabelog URL in the Japanese form (host tabelog.com, no /en/ /cn/ /tw/ /ko/ segment). Do not invent scores, prices, hours, or URLs; a shop whose data you cannot verify does not get saved.",
+  ].join("\n");
+  try {
+    await ctx.agent.spawnTask(message, { expectsAction: "patchCandidates" });
+  } catch (e) {
+    const msg = await noteSpawnError(ctx, "startPhotoBackfill", e);
+    return { started: false, note: `spawn failed: ${msg}` };
+  }
+  await setMeta(ctx, "photo_backfill_started_at", new Date().toISOString());
+  return {
+    started: true,
+    note: `backfill task started for ${work.fieldGaps.length} field gaps / ${work.refills.length} refills (script had closed ${script.filledFields} fields / ${script.refilledCandidates} refills from stored data)`,
+  };
+}
+
+/* ---------------- Calendar-watch batch (new/changed events) ---------------- */
+
+type CalendarEventFp = {
+  id: string;
+  summary: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  location: string;
+  status: string;
+};
+
+function eventFingerprint(e: CalendarEventFp): string {
+  return [e.summary, e.start, e.end, e.location].join("|");
+}
+
+/** The event's Tokyo date: all-day events carry their date directly;
+ * timed events carry an offset dateTime, which is converted to the
+ * Asia/Tokyo calendar date. */
+function eventTokyoDate(e: CalendarEventFp): string {
+  if (e.allDay) return e.start.slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(e.start));
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "01";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+/** Targeted batch for the calendar watch (user instruction,
+ * 2026-11-17): when the 5-minute fingerprint check finds NEW or
+ * CHANGED outing events on the user's primary calendar, research ONLY
+ * those slots — completely: 10+ meal candidates with photos for every
+ * candidate, 3 sweets, the station's cafes (database first), and the
+ * route from home. All standing rules (Tabelog >= 3.3, budget cap,
+ * hidden list, feedback loop, Home-area weekly no-repeat, photo
+ * completeness) apply exactly as in the nightly refresh. */
+async function startSlotBatch(
+  ctx: Ctx,
+  changed: CalendarEventFp[],
+): Promise<StartResult> {
+  const settings = await getSettings(ctx);
+  const hidden = await loadHidden(ctx);
+  const feedback = await loadFeedback(ctx);
+  const db = ctx.db<typeof schema>();
+  const cafeStationRows = await db.select().from(schema.cafeStations);
+  const knownCafeStations = cafeStationRows
+    .filter((r) => r.researchedAt != null)
+    .map((r) => r.station);
+  const pendingCafeStations = cafeStationRows
+    .filter((r) => r.registered && r.researchedAt == null)
+    .map((r) => r.station);
+  const message = [
+    "You are running a TARGETED BATCH for the Muse web artifact `clander-driven-lifestyle` (予定日程付近グルメ): the user's calendar watch detected NEW or CHANGED events on the user's own primary Google Calendar. Research ONLY the slots for the events listed below — completely, in this one pass — and save them via the artifact action `saveCandidates` on this artifact's slug (see space.json). Do not re-research any other slot.",
+    `TARGET EVENTS (from the primary calendar; eventKey = the event id): ${changed
+      .map(
+        (e) =>
+          `id=${e.id} / date=${eventTokyoDate(e)} / title=「${e.summary}」 / ${e.allDay ? "all-day" : `${e.start} → ${e.end}`} / location=「${e.location || "(none)"}」`,
+      )
+      .join("; ")}`,
+    "SLOT RULES — apply the app's standing outing rules to each target event: a station name in the event TITLE is the highest-priority area signal (overrides the location field); next the location field, then a place word in the title (example: 「【定期】 ○○駅前クラス」 → area and nearest station as named in the title). Research meal candidates in the nearest station's OWN surrounding district first and put them at the FRONT of the list; adjacent-district shops are fallbacks placed after, each with its walking distance from the station in the note. If a target event turns out NOT to be an outing under the standing rules (a pure reminder, a dividend/release-date marker, a TV/streaming/sports-viewing event with no outing, no location and no place word in the title), skip it and save nothing for it. If an event's date or area CHANGED, save the slot on its NEW date/area in full (the stale copy is pruned by the nightly refresh). One slot per event; never merge two events into one slot.",
+    `CANDIDATES: research ON tabelog.com — open each restaurant's Tabelog page and read its score there. ONLY Tabelog >= 3.3 (never another site's rating). AT LEAST 10 meal candidates per slot (10–12 target), all within the ¥${settings.budgetYen} budget: a shop whose Tabelog price range for the relevant meal does not fit the budget is NEVER saved (not even flagged) — keep researching instead. For evening events (start >= 17:00, e.g. a 19:00 event), research dinner options reachable BEFORE the event start. Preferred genres first: ${settings.genres.join(", ") || "(none set)"}. For EVERY candidate copy from its Tabelog page: hoursText (business hours EXACTLY as shown, empty string only when unstated — never invented) and closedDays (e.g. 水曜日 / 不定休 / 無休, empty when unstated); photoUrl (MANDATORY for every candidate — the shop's own photo from its Tabelog page, the tblg.k-img.com URL copied exactly; fallbacks in order: the same shop's official-site photo, then a real same-genre photo; a candidate that cannot get any photo is replaced by another qualifying shop that has one — photo completeness is a completion condition, see below); mapUrl (the link destination of the 「大きな地図を見る」 map button on the shop's Tabelog page — its …/<restaurant-id>/dtlmap/ page — copied exactly; null only when genuinely unobtainable, never a substitute URL); priceLabel; genre; a short factual note only when the page states it. Preserve your array order as the display order (nearest-station-district picks first, score descending within groups).`,
+    ...(settings.sweetsEnabled
+      ? [
+          `SWEETS: also research up to 3 souvenir-sweets shops per slot near the area on tabelog.com (Tabelog >= 3.3, known for ${settings.sweets.join(", ")}), saved with category "sweets" under the same hours/photo/map rules, the note naming the signature item when the page states it.`,
+        ]
+      : []),
+    `CAFES — STATION DATABASE FIRST: stations already researched in the cafe database: ${knownCafeStations.length ? knownCafeStations.join(", ") : "(none yet)"} — for a target slot whose station is in that list, DO NOT research cafes (send cafes: []). Registered but not yet researched: ${pendingCafeStations.length ? pendingCafeStations.join(", ") : "(none)"} — if a target slot's station is one of these, or a genuinely new station, research it now BY BRAND (スターバックス, タリーズ, ドトール, カフェ・ド・クリエ, エクセルシオール カフェ, 喫茶室ルノアール, プロント, コメダ珈琲店, ベローチェ, サンマルクカフェ, and any other chain near the station): EVERY shop of each brand within walking distance (cross-check the count against the chain's official store search), each classified locationType "inside" (駅中: 改札内・コンコース内・エキナカ・駅直結地下街） or "outside" （駅外： street-level and station-building shops; omit only when genuinely unjudgeable), with the canonical chainName （タリーズ — never タリーズコーヒー), address when shown, a Google Maps search mapUrl pinning the exact shop (https://www.google.com/maps/search/?api=1&query= + shop name + station, URL-encoded) — a map link is MANDATORY for every cafe — photoUrl only when a real official/map photo URL is copied exactly (else null), sourceLabel and sourceUrl (the exact page verified on). Send researched shops in the TOP-LEVEL stationCafes array ([{ station, name, chainName, address, mapUrl, photoUrl, sourceLabel, sourceUrl, note, locationType }]) AND in the slot's cafes array.`,
+    "ROUTES （行き方）: the user's home stations are the configured route origin stations (ADOPTER_CONFIG.routeOriginStations in server/src/actions.ts). If a target slot's destination station has no stored route yet, research it ONCE on a real route-search service （駅探 / Yahoo!路線 / NAVITIME / Google Maps), compare BOTH origins, adopt the cheaper/more reasonable plan (lowest IC fare, then fewer transfers, then faster), and save it in the top-level routes array: [{ destStation, originStation, fareIcYen, durationMin, transfers, sourceLabel (service + date), sourceUrl (exact result page URL), legs: [{ line, fromStation, toStation, stops, minutes, note }], note }]. Record ONLY values the search actually shows — an unconfirmed fare/time stays null, never invented. Stations with a stored route are reused as-is.",
+    ...(hidden.length
+      ? [
+          `HIDDEN SHOPS — NEVER PROPOSE (permanent exclusion list): ${hidden
+            .slice(0, 100)
+            .map((h) => (h.tabelogUrl ? `${h.name} (${h.tabelogUrl})` : h.name))
+            .join("; ")}.`,
+        ]
+      : []),
+    ...(feedback.length
+      ? [
+          `USER FEEDBACK (feedback loop; hard rules unchanged): PRIORITIZE shops rated >= 4.0 — include them at the FRONT of the slot's list when they qualify: ${feedback
+            .filter((f) => f.rating >= 4.0)
+            .map((f) => `${f.shopName} ★${f.rating.toFixed(1)} (${f.tabelogUrl})${f.memo ? ` — memo: 「${f.memo}」` : ""}`)
+            .join("; ") || "(none yet)"}. NEVER PROPOSE shops rated <= 2.5 in any slot: ${feedback
+            .filter((f) => f.rating <= 2.5)
+            .map((f) => `${f.shopName} ★${f.rating.toFixed(1)} (${f.tabelogUrl})`)
+            .join("; ") || "(none yet)"}.`,
+        ]
+      : []),
+    "PHOTO COMPLETENESS — COMPLETION CONDITION (user instruction, 2026-11-17): every candidate you save in this batch (meals AND sweets) must carry a real photoUrl. A slot saved with a photo-less candidate is an unfinished save.",
+    "SAVE FORMAT: one saveCandidates call with { slots: [...], stationCafes: [...], routes: [...] }. Each slot: date (YYYY-MM-DD, Asia/Tokyo), eventKey (the calendar event id given above), kind 'event', eventTitle, eventStart/eventEnd (local ISO with +09:00, or null for all-day), allDay, location, area, candidates: [{ name, genre, score, priceLabel, overBudget (always false), tabelogUrl, mapUrl, photoUrl, note, hoursText, closedDays, category ('meal'|'sweets') }], cafes: [{ name, chainName, address, mapUrl, note, locationType }], articles: 1–3 Tabelog まとめ記事 you actually opened for the area ([{ title, url }]). URL RULE: every Tabelog URL in the JAPANESE form (host tabelog.com, NO /en/ /cn/ /tw/ /ko/ segment). If Tabelog cannot be reached for a slot, still save the slot with an empty candidates array so the UI shows an honest researching state. Never invent scores, prices, hours, or URLs.",
+  ].join("\n");
+  try {
+    await ctx.agent.spawnTask(message, { expectsAction: "saveCandidates" });
+  } catch (e) {
+    const msg = await noteSpawnError(ctx, "startSlotBatch", e);
+    return { started: false, note: `spawn failed: ${msg}` };
+  }
+  await setMeta(ctx, "slot_batch_started_at", new Date().toISOString());
+  return { started: true, note: "slot batch started" };
+}
+
+/** Script-first refresh orchestration (long-term operation rule,
+ * 2026-11-17): the nightly refresh and the settings-triggered
+ * re-research NO LONGER spawn a full research agent by default.
+ * Plain server code (1) reads the primary calendar's event
+ * fingerprints through the host CLI — no agent, no tokens — (2)
+ * diffs them against the stored set, (3) lets the completion layer
+ * script-close every gap stored data can close, and only then
+ * decides:
+ *   - no changed events + window complete → STEADY STATE: nothing is
+ *     spawned at all; the whole refresh costs one CLI read + DB
+ *     queries (≈ zero agent tokens);
+ *   - changed/new events → the targeted slot batch for those events
+ *     only (fingerprints advance only when the batch starts);
+ *   - only field gaps / below-target slots left → the delta backfill;
+ *   - cafe stations registered but never researched → the legacy
+ *     full refresh (a destination's first research needs an agent);
+ *   - the calendar CLI read failed → the legacy full refresh as a
+ *     fallback (its agent reads the calendar itself).
+ * Even the legacy full refresh now carries a SKIP list of
+ * already-complete slots, so it never re-researches a finished one. */
+async function startScriptFirstRefresh(ctx: Ctx): Promise<StartResult> {
+  const today = tokyoToday();
+  const start = mondayOf(today);
+  const end = addDays(start, 20); // through Sunday of the week after next
+  const res = await ctx
+    .executePrivileged(privileged.readPrimaryCalendarEvents, {
+      timeMin: `${start}T00:00:00+09:00`,
+      timeMax: `${addDays(end, 1)}T00:00:00+09:00`,
+    })
+    .catch((e: unknown) => {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message.slice(0, 200) : "unknown",
+        events: [] as never[],
+      };
+    });
+  if (!res.ok) {
+    const legacy = await startRefresh(ctx);
+    return {
+      started: legacy.started,
+      note: `calendar CLI read failed (${res.error}); legacy full refresh fallback (${legacy.note})`,
+    };
+  }
+  const current = new Map<string, string>();
+  const byId = new Map<string, CalendarEventFp>();
+  for (const e of res.events) {
+    if (e.status === "cancelled") continue;
+    const ev: CalendarEventFp = {
+      id: e.id,
+      summary: e.summary,
+      start: e.start,
+      end: e.end,
+      allDay: e.allDay,
+      location: e.location,
+      status: e.status,
+    };
+    current.set(ev.id, eventFingerprint(ev));
+    byId.set(ev.id, ev);
+  }
+  const storedRaw = await getMeta(ctx, "calendar_fingerprints_v1");
+  let stored: Record<string, string> = {};
+  let baseline = false;
+  if (!storedRaw) {
+    // First scripted read: record the baseline only (the watch keeps
+    // it current from here); completeness below still applies.
+    baseline = true;
+    await setMeta(
+      ctx,
+      "calendar_fingerprints_v1",
+      JSON.stringify(Object.fromEntries(current)),
+    );
+  } else {
+    try {
+      const parsed = JSON.parse(storedRaw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        stored = parsed as Record<string, string>;
+      }
+    } catch {
+      stored = {};
+    }
+  }
+  const changed: CalendarEventFp[] = [];
+  if (!baseline) {
+    for (const [id, fp] of current) {
+      if (stored[id] !== fp) {
+        const ev = byId.get(id);
+        if (ev) changed.push(ev);
+      }
+    }
+  }
+  if (changed.length) {
+    // Another research task is running: leave the fingerprints
+    // untouched so the same changes are retried on the next run.
+    for (const key of [
+      "slot_batch_started_at",
+      "refresh_started_at",
+      "photo_backfill_started_at",
+    ]) {
+      const ageMin = await startStampAgeMin(ctx, key);
+      if (ageMin != null && ageMin < 10) {
+        return {
+          started: false,
+          note: `throttled: ${key} is ${Math.floor(ageMin)} min old; ${changed.length} changed event(s) will be retried`,
+        };
+      }
+    }
+    const batch = await startSlotBatch(ctx, changed);
+    if (batch.started) {
+      await setMeta(
+        ctx,
+        "calendar_fingerprints_v1",
+        JSON.stringify(Object.fromEntries(current)),
+      );
+    }
+    return {
+      started: batch.started,
+      note: `${changed.length} changed/new calendar event(s); targeted batch (${batch.note})`,
+    };
+  }
+  // No calendar changes: advance the stored set (drops deleted
+  // events), then check for never-researched cafe stations — the one
+  // remaining reason to run the legacy full research.
+  if (!baseline) {
+    await setMeta(
+      ctx,
+      "calendar_fingerprints_v1",
+      JSON.stringify(Object.fromEntries(current)),
+    );
+  }
+  const db = ctx.db<typeof schema>();
+  const cafeStationRows = await db.select().from(schema.cafeStations);
+  const pendingCafe = cafeStationRows.filter(
+    (r) => r.registered && r.researchedAt == null,
+  );
+  if (pendingCafe.length) {
+    const legacy = await startRefresh(ctx);
+    return {
+      started: legacy.started,
+      note: `unresearched cafe stations pending (${pendingCafe.map((r) => r.station).join(", ")}); full refresh (${legacy.note})`,
+    };
+  }
+  // Completion layer: script closes what stored data can close; a
+  // delta agent pass is started only for the rest.
+  const backfill = await startPhotoBackfill(ctx);
+  if (!backfill.started && backfill.note.startsWith("complete:")) {
+    return {
+      started: false,
+      note: `steady state: no calendar changes and the window is complete — no agent task started (${backfill.note})`,
+    };
+  }
+  return backfill;
 }
 
 /* ---------------- Shared shapes ---------------- */
@@ -1526,8 +2444,7 @@ const slotOut = z.object({
   articles: z.array(articleOut),
   sweets: z.array(candidateOut),
   // Adopted cheapest route from the configured home stations to this
-  // slot's nearest station, or null when that station has no researched
-  // route yet.
+  // station, or null when that station has no researched route yet.
   route: routeOut.nullable(),
   // Cafe database status for this slot's station: the station key, and
   // when its cafes were researched (null = registered but not yet
@@ -1639,13 +2556,18 @@ const okResponse = z.object({ ok: z.literal(true) });
 export const Actions = {
   getSchedule: defineAction({
     description:
-      "Returns the two-week lunch schedule: calendar-event slots (or Home fallback slots) with their Tabelog candidates, plus refresh status.",
+      "Returns the two-week lunch schedule: calendar-event slots (or home-area fallback slots) with their Tabelog candidates, plus refresh status.",
     request: z.object({}),
     response: z.object({
       today: z.string(),
       lastRefreshedAt: z.string().nullable(),
       refreshStartedAt: z.string().nullable(),
       anyResearching: z.boolean(),
+      // Photo completeness in the window today → Sunday of next week
+      // (user rule, 2026-11-17): displayed candidates without a photo,
+      // and slots below their candidate target. Zero + zero = complete.
+      photoMissingCount: z.number(),
+      belowTargetSlotCount: z.number(),
       settings: settingsSchema,
       // Cafe database coverage: every registered destination station and
       // whether its cafes have been researched (null = not yet; the
@@ -1942,11 +2864,14 @@ export const Actions = {
         wi++;
       }
 
+      const photoState = await photoCompletionState(ctx);
       return {
         today,
         lastRefreshedAt: await getMeta(ctx, "last_refreshed_at"),
         refreshStartedAt: await getMeta(ctx, "refresh_started_at"),
         anyResearching,
+        photoMissingCount: photoState.gaps.length,
+        belowTargetSlotCount: photoState.belowTarget.length,
         settings: await getSettings(ctx),
         cafeDbStations: cafeStationRows
           .filter((r) => r.registered)
@@ -1963,16 +2888,404 @@ export const Actions = {
 
   refreshSchedule: defineAction({
     description:
-      "Starts a background refresh: re-reads the user's Google Calendar and re-researches Tabelog lunch candidates for this week and next week.",
+      "Script-first refresh (the nightly 02:40 cron and the manual update button): heals stored data, then plain server code reads the primary calendar's event fingerprints via the host CLI and diffs them — when nothing changed and the completion window (today → Sunday of next week) is complete, NO agent task is started at all (steady state, ≈ zero tokens). Changed/new events start only their targeted slot batch; remaining photo/count gaps start only the delta backfill (after the script layer closes what stored data can). The legacy full research runs only for never-researched cafe stations or when the calendar CLI read fails. Returns whether an agent task was started, plus a note saying which path was taken and why.",
     request: z.object({}),
-    response: z.object({ started: z.boolean() }),
+    response: z.object({ started: z.boolean(), note: z.string() }),
+    privileged: [privileged.readPrimaryCalendarEvents],
     async handler(ctx) {
       // Heal stored data on every refresh trigger (this is the path the
       // nightly cron executes): merge duplicate slots, normalize URLs.
       await healStoredData(ctx);
-      const started = await startRefresh(ctx);
+      const res = await startScriptFirstRefresh(ctx);
       ctx.invalidateQueries();
-      return { started };
+      return { started: res.started, note: res.note };
+    },
+  }),
+
+  backfillPhotos: defineAction({
+    description:
+      "Targeted photo-completion pass for the window today → Sunday of next week: counts displayed meal/sweets candidates without a photo and slots below their candidate target, and when any exist starts ONE background task that re-fetches each missing photo from the shop's Tabelog page in the same pass (fallbacks: another real photo of the same shop, else replace the candidate with a qualifying shop that has a photo) and refills below-target slots with photo-carrying candidates. Returns the gap counts it found plus a note saying whether a task started, was throttled (a research task is already running), or failed to spawn (with the error). Completion is re-driven automatically by the 5-minute calendar watch and by saveCandidates chaining until the counts reach zero.",
+    request: z.object({}),
+    response: z.object({
+      started: z.boolean(),
+      missingPhotos: z.number(),
+      belowTargetSlots: z.number(),
+      note: z.string(),
+      lastSpawnError: z.string().nullable(),
+    }),
+    async handler(ctx) {
+      const state = await photoCompletionState(ctx);
+      const res = await startPhotoBackfill(ctx);
+      ctx.invalidateQueries();
+      return {
+        started: res.started,
+        missingPhotos: state.gaps.length,
+        belowTargetSlots: state.belowTarget.length,
+        note: res.note,
+        lastSpawnError: await getMeta(ctx, "spawn_last_error"),
+      };
+    },
+  }),
+
+  getBackfillWorklist: defineAction({
+    description:
+      "The delta-only research worklist for the completion window (today → Sunday of next week): ONLY the displayed candidates missing a photo (each with its candidateId/slotId and exactly which fields are missing) and the slots below their candidate target (slotId, current counts, how many meals/sweets are needed, and for home-area slots the names already used that week). Complete slots and complete candidates are never included — this is the only schedule data a backfill agent ever reads (never getSchedule).",
+    request: z.object({}),
+    response: z.object({
+      windowFrom: z.string(),
+      windowTo: z.string(),
+      fieldGaps: z.array(
+        z.object({
+          slotId: z.number(),
+          candidateId: z.number(),
+          slotDate: z.string(),
+          slotTitle: z.string(),
+          name: z.string(),
+          category: z.string(),
+          tabelogUrl: z.string().nullable(),
+          missing: z.array(z.string()),
+        }),
+      ),
+      refills: z.array(
+        z.object({
+          slotId: z.number(),
+          slotDate: z.string(),
+          slotTitle: z.string(),
+          area: z.string(),
+          kind: z.string(),
+          mealCount: z.number(),
+          sweetsCount: z.number(),
+          needMeals: z.number(),
+          needSweets: z.number(),
+          weekUsedNames: z.array(z.string()),
+        }),
+      ),
+    }),
+    async handler(ctx) {
+      const { from, to } = photoWindow();
+      const work = await researchWorklist(ctx);
+      return { windowFrom: from, windowTo: to, ...work };
+    },
+  }),
+
+  patchCandidates: defineAction({
+    description:
+      "Delta-only save for research agents (the backfill pass): applies ONLY the listed changes — field updates by candidateId (photoUrl/mapUrl/hoursText/closedDays; a provided non-empty value is set, omitted fields are never touched, stored values are never cleared), additions of newly researched candidates by slotId, and replacements by candidateId (the old row is deleted and the new candidate takes its slot, rank and category). Additions/replacements must carry a real photoUrl and pass the same hard rules as saveCandidates (Tabelog >= 3.3 by schema, hidden shops and shops rated <= 2.5 dropped, over-budget meals dropped, per-slot caps 15 meals / 3 sweets). Nothing else in the database is read or rewritten; when the save still leaves the window incomplete, the next completion pass is chained automatically.",
+    request: z.object({
+      updates: z
+        .array(
+          z.object({
+            candidateId: z.number().int(),
+            photoUrl: z.string().url().nullable().optional(),
+            mapUrl: z.string().url().nullable().optional(),
+            hoursText: z.string().optional(),
+            closedDays: z.string().optional(),
+          }),
+        )
+        .max(120)
+        .default([]),
+      additions: z
+        .array(z.object({ slotId: z.number().int(), candidate: candidateIn }))
+        .max(80)
+        .default([]),
+      replacements: z
+        .array(z.object({ candidateId: z.number().int(), candidate: candidateIn }))
+        .max(80)
+        .default([]),
+    }),
+    response: z.object({
+      updated: z.number(),
+      added: z.number(),
+      replaced: z.number(),
+      dropped: z.number(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const settings = await getSettings(ctx);
+      const hiddenRows = await loadHidden(ctx);
+      const feedbackRows = await loadFeedback(ctx);
+      let updated = 0;
+      let added = 0;
+      let replaced = 0;
+      let dropped = 0;
+      const passesRules = (c: z.infer<typeof candidateIn>): boolean =>
+        !!c.photoUrl &&
+        !matchesHidden({ name: c.name, tabelogUrl: c.tabelogUrl ?? null }, hiddenRows) &&
+        !isLowRated({ name: c.name, tabelogUrl: c.tabelogUrl ?? null }, feedbackRows) &&
+        !(c.category === "meal" && isOverBudgetCandidate(c, settings.budgetYen)) &&
+        !(c.category === "sweets" && c.overBudget);
+      // Field updates: fill-only. A provided non-empty value is set;
+      // an omitted/null/empty value never clears or overwrites.
+      for (const u of args.updates) {
+        const rows = await db
+          .select()
+          .from(schema.candidates)
+          .where(eq(schema.candidates.id, u.candidateId));
+        const row = rows[0];
+        if (!row) {
+          dropped++;
+          continue;
+        }
+        const patch: Partial<{
+          photoUrl: string;
+          mapUrl: string;
+          hoursText: string;
+          closedDays: string;
+        }> = {};
+        if (u.photoUrl) patch.photoUrl = u.photoUrl;
+        if (u.mapUrl) patch.mapUrl = normalizeTabelogUrl(u.mapUrl) ?? u.mapUrl;
+        if (u.hoursText) patch.hoursText = u.hoursText;
+        if (u.closedDays) patch.closedDays = u.closedDays;
+        if (!Object.keys(patch).length) {
+          dropped++;
+          continue;
+        }
+        await db
+          .update(schema.candidates)
+          .set(patch)
+          .where(eq(schema.candidates.id, row.id));
+        updated++;
+      }
+      // Additions: new candidates for a below-target slot.
+      for (const a of args.additions) {
+        const slotRows = await db
+          .select()
+          .from(schema.slots)
+          .where(eq(schema.slots.id, a.slotId));
+        const slot = slotRows[0];
+        if (!slot || !passesRules(a.candidate)) {
+          dropped++;
+          continue;
+        }
+        const existing = await db
+          .select()
+          .from(schema.candidates)
+          .where(eq(schema.candidates.slotId, slot.id));
+        const sameCat = existing.filter((c) => c.category === a.candidate.category);
+        if (sameCat.length >= (a.candidate.category === "sweets" ? 3 : 15)) {
+          dropped++;
+          continue;
+        }
+        if (
+          existing.some(
+            (c) => shopKey(c.name, c.tabelogUrl) === shopKey(a.candidate.name, a.candidate.tabelogUrl ?? null),
+          )
+        ) {
+          dropped++;
+          continue;
+        }
+        const rank = existing.reduce((m, c) => Math.max(m, c.rank), -1) + 1;
+        await db.insert(schema.candidates).values({
+          slotId: slot.id,
+          category: a.candidate.category,
+          name: a.candidate.name,
+          genre: a.candidate.genre,
+          score: a.candidate.score,
+          priceLabel: a.candidate.priceLabel,
+          overBudget: false,
+          tabelogUrl: normalizeTabelogUrl(a.candidate.tabelogUrl ?? null),
+          mapUrl: normalizeTabelogUrl(a.candidate.mapUrl ?? null),
+          photoUrl: a.candidate.photoUrl ?? null,
+          note: a.candidate.note,
+          hoursText: a.candidate.hoursText,
+          closedDays: a.candidate.closedDays,
+          rank,
+        });
+        added++;
+      }
+      // Replacements: the old candidate is deleted; the new one takes
+      // its slot, rank and category (the payload's category is ignored
+      // so a replacement can never silently change category).
+      for (const r of args.replacements) {
+        const rows = await db
+          .select()
+          .from(schema.candidates)
+          .where(eq(schema.candidates.id, r.candidateId));
+        const old = rows[0];
+        if (!old || !passesRules({ ...r.candidate, category: old.category as "meal" | "sweets" })) {
+          dropped++;
+          continue;
+        }
+        await db.delete(schema.candidates).where(eq(schema.candidates.id, old.id));
+        await db.insert(schema.candidates).values({
+          slotId: old.slotId,
+          category: old.category as "meal" | "sweets",
+          name: r.candidate.name,
+          genre: r.candidate.genre,
+          score: r.candidate.score,
+          priceLabel: r.candidate.priceLabel,
+          overBudget: false,
+          tabelogUrl: normalizeTabelogUrl(r.candidate.tabelogUrl ?? null),
+          mapUrl: normalizeTabelogUrl(r.candidate.mapUrl ?? null),
+          photoUrl: r.candidate.photoUrl ?? null,
+          note: r.candidate.note,
+          hoursText: r.candidate.hoursText,
+          closedDays: r.candidate.closedDays,
+          rank: old.rank,
+        });
+        replaced++;
+      }
+      if (updated || added || replaced) {
+        await setMeta(ctx, "last_refreshed_at", new Date().toISOString());
+      }
+      await chainPhotoBackfill(ctx);
+      ctx.invalidateQueries();
+      return { updated, added, replaced, dropped };
+    },
+  }),
+
+  checkCalendarChanges: defineAction({
+    description:
+      "The 5-minute calendar watch (silent cron): reads ONLY event fingerprints (id, title, start, end, location) from the user's own primary Google Calendar through a host CLI call — no agent, no model tokens — and compares them with the fingerprints stored at the previous check. When nothing changed it does nothing at all. When a new or changed event is found, it starts a targeted batch that researches ONLY those slots completely (10+ candidates with photos, sweets, station cafes, route from home). The first run only records the baseline fingerprints. The same tick also drives photo completion: while the window (today → Sunday of next week) still has photo gaps or below-target slots, it (re)starts the targeted photo backfill whenever no research task is running, so the backfill is retried every 5 minutes until it completes instead of depending on a single spawn.",
+    request: z.object({}),
+    response: z.object({
+      ok: z.boolean(),
+      changed: z.boolean(),
+      started: z.boolean(),
+      newOrChanged: z.number(),
+      note: z.string(),
+      backfillStarted: z.boolean(),
+      backfillNote: z.string(),
+    }),
+    privileged: [privileged.readPrimaryCalendarEvents],
+    async handler(ctx) {
+      // Photo-completion drive (fix, 2026-11-17): runs on EVERY tick,
+      // independent of the calendar outcome below — even when the
+      // calendar read fails or nothing changed. startPhotoBackfill
+      // no-ops when the window is complete or a research task started
+      // within the last 10 minutes; otherwise it (re)starts the
+      // backfill, so gaps left by a dead or partial pass are retried
+      // within 5 minutes instead of stranding until the 02:40 refresh.
+      const backfill = await startPhotoBackfill(ctx);
+      const today = tokyoToday();
+      const start = mondayOf(today);
+      const end = addDays(start, 20); // through Sunday of next week
+      const res = await ctx
+        .executePrivileged(privileged.readPrimaryCalendarEvents, {
+          timeMin: `${start}T00:00:00+09:00`,
+          timeMax: `${addDays(end, 1)}T00:00:00+09:00`,
+        })
+        .catch((e: unknown) => {
+          return {
+            ok: false as const,
+            error: e instanceof Error ? e.message.slice(0, 200) : "unknown",
+            events: [] as never[],
+          };
+        });
+      if (!res.ok) {
+        // No information this tick (CLI/connection hiccup): keep the
+        // stored fingerprints untouched and retry on the next tick.
+        return {
+          ok: false,
+          changed: false,
+          started: false,
+          newOrChanged: 0,
+          note: `calendar read failed: ${res.error}`,
+          backfillStarted: backfill.started,
+          backfillNote: backfill.note,
+        };
+      }
+      const current = new Map<string, string>();
+      const byId = new Map<string, CalendarEventFp>();
+      for (const e of res.events) {
+        if (e.status === "cancelled") continue;
+        current.set(e.id, eventFingerprint(e));
+        byId.set(e.id, e);
+      }
+      const storedRaw = await getMeta(ctx, "calendar_fingerprints_v1");
+      if (!storedRaw) {
+        // First run: record the baseline only — the nightly refresh
+        // owns the current window's content, so no batch is started.
+        await setMeta(
+          ctx,
+          "calendar_fingerprints_v1",
+          JSON.stringify(Object.fromEntries(current)),
+        );
+        return {
+          ok: true,
+          changed: false,
+          started: false,
+          newOrChanged: 0,
+          note: "baseline fingerprints recorded",
+          backfillStarted: backfill.started,
+          backfillNote: backfill.note,
+        };
+      }
+      let stored: Record<string, string> = {};
+      try {
+        const parsed = JSON.parse(storedRaw) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          stored = parsed as Record<string, string>;
+        }
+      } catch {
+        stored = {};
+      }
+      const changedEvents: CalendarEventFp[] = [];
+      for (const [id, fp] of current) {
+        if (stored[id] !== fp) {
+          const ev = byId.get(id);
+          if (ev) changedEvents.push(ev);
+        }
+      }
+      if (!changedEvents.length) {
+        // Nothing new or changed: update the stored set (this also
+        // drops fingerprints of deleted events) and do nothing else.
+        await setMeta(
+          ctx,
+          "calendar_fingerprints_v1",
+          JSON.stringify(Object.fromEntries(current)),
+        );
+        return {
+          ok: true,
+          changed: false,
+          started: false,
+          newOrChanged: 0,
+          note: "no changes",
+          backfillStarted: backfill.started,
+          backfillNote: backfill.note,
+        };
+      }
+      // A batch or refresh is already running: keep the OLD stored
+      // fingerprints so the next tick re-detects the same changes and
+      // starts the batch then, instead of losing them.
+      const now = Date.now();
+      for (const key of [
+        "slot_batch_started_at",
+        "refresh_started_at",
+        "photo_backfill_started_at",
+      ]) {
+        const last = await getMeta(ctx, key);
+        if (last && now - new Date(last).getTime() < 10 * 60 * 1000) {
+          return {
+            ok: true,
+            changed: true,
+            started: false,
+            newOrChanged: changedEvents.length,
+            note: "research already running; will retry next tick",
+            backfillStarted: backfill.started,
+            backfillNote: backfill.note,
+          };
+        }
+      }
+      const batch = await startSlotBatch(ctx, changedEvents);
+      if (batch.started) {
+        await setMeta(
+          ctx,
+          "calendar_fingerprints_v1",
+          JSON.stringify(Object.fromEntries(current)),
+        );
+      }
+      return {
+        ok: true,
+        changed: true,
+        started: batch.started,
+        newOrChanged: changedEvents.length,
+        note: batch.started
+          ? "targeted batch started for new/changed events"
+          : `batch failed to start (${batch.note}); will retry next tick`,
+        backfillStarted: backfill.started,
+        backfillNote: backfill.note,
+      };
     },
   }),
 
@@ -1996,14 +3309,15 @@ export const Actions = {
 
   updateSettings: defineAction({
     description:
-      "Saves the food preference settings and starts a re-research so candidate selection follows the new preferences.",
+      "Saves the food preference settings and re-checks the schedule under them via the script-first refresh (no agent task when the window is still complete under the new settings; a targeted batch/backfill only for what the change actually invalidated).",
     request: settingsSchema,
     response: z.object({ saved: z.literal(true), refreshStarted: z.boolean() }),
+    privileged: [privileged.readPrimaryCalendarEvents],
     async handler(ctx, args): Promise<{ saved: true; refreshStarted: boolean }> {
       await setMeta(ctx, "settings_v1", JSON.stringify(sanitizeSettings(args)));
-      const refreshStarted = await startRefresh(ctx);
+      const refresh = await startScriptFirstRefresh(ctx);
       ctx.invalidateQueries();
-      return { saved: true, refreshStarted };
+      return { saved: true, refreshStarted: refresh.started };
     },
   }),
 
@@ -2340,6 +3654,19 @@ export const Actions = {
           if (match) existing = [match];
         }
         let slotId: number;
+        // Photo/map carry-over (photo completeness rule, 2026-11-17):
+        // a re-save must never LOSE a photo or map URL that an earlier
+        // pass already collected for the same shop — when the incoming
+        // candidate lacks one, the stored value is carried over.
+        const prevCands = existing[0]
+          ? await db
+              .select()
+              .from(schema.candidates)
+              .where(eq(schema.candidates.slotId, existing[0].id))
+          : [];
+        const prevByKey = new Map(
+          prevCands.map((p) => [shopKey(p.name, p.tabelogUrl), p]),
+        );
         const values = {
           date: slot.date,
           kind: slot.kind,
@@ -2377,7 +3704,7 @@ export const Actions = {
         // Exclusion list first: a shop the user hid is never stored
         // again, in any slot. HARD BUDGET RULE next: an over-budget meal
         // candidate is dropped here, never stored with a flag (sweets
-        // are dropped only when flagged overBudget). (The Home
+        // are dropped only when flagged overBudget). (The home-area
         // weekly no-repeat rule is enforced by healStoredData at the
         // end of this save.)
         const saveSettings = await getSettings(ctx);
@@ -2401,8 +3728,9 @@ export const Actions = {
           .slice(0, 3);
         const cands = [...meals, ...sweets];
         if (cands.length) {
-          const stmts: BatchItem<"sqlite">[] = cands.map((c, i) =>
-            db.insert(schema.candidates).values({
+          const stmts: BatchItem<"sqlite">[] = cands.map((c, i) => {
+            const prev = prevByKey.get(shopKey(c.name, c.tabelogUrl ?? null));
+            return db.insert(schema.candidates).values({
               slotId,
               category: c.category,
               name: c.name,
@@ -2411,14 +3739,16 @@ export const Actions = {
               priceLabel: c.priceLabel,
               overBudget: false,
               tabelogUrl: normalizeTabelogUrl(c.tabelogUrl ?? null),
-              mapUrl: normalizeTabelogUrl(c.mapUrl ?? null),
-              photoUrl: c.photoUrl ?? null,
+              mapUrl:
+                normalizeTabelogUrl(c.mapUrl ?? null) ??
+                normalizeTabelogUrl(prev?.mapUrl ?? null),
+              photoUrl: c.photoUrl ?? prev?.photoUrl ?? null,
               note: c.note,
               hoursText: c.hoursText,
               closedDays: c.closedDays,
               rank: i,
-            }),
-          );
+            });
+          });
           const [first, ...rest] = stmts;
           if (first) await db.batch([first, ...rest]);
         }
@@ -2509,6 +3839,9 @@ export const Actions = {
       // behind and normalize stored URLs, so duplicates never accumulate.
       await healStoredData(ctx);
       await setMeta(ctx, "last_refreshed_at", new Date().toISOString());
+      // Photo-completion continuation: chain the next completion
+      // pass when this save still leaves the window incomplete.
+      await chainPhotoBackfill(ctx);
       ctx.invalidateQueries();
       return { saved };
     },
@@ -2603,9 +3936,9 @@ export const Actions = {
         await setMeta(ctx, "seeded_v2", new Date().toISOString());
         if (seeded > 0) await setMeta(ctx, "last_refreshed_at", new Date().toISOString());
       }
-      const refreshStarted = await startRefresh(ctx);
+      const refresh = await startRefresh(ctx);
       ctx.invalidateQueries();
-      return { seeded, refreshStarted };
+      return { seeded, refreshStarted: refresh.started };
     },
   }),
 
