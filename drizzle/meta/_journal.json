@@ -1,0 +1,97 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1794653135381,
+      "tag": "0001_initial",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1794653135381,
+      "tag": "0002_slots_candidates_meta_replace_entries",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794656797003,
+      "tag": "0003_add_candidate_category_for_souvenir_sweets",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794660012764,
+      "tag": "0004_add_cafes_and_tabelog_articles",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794661014220,
+      "tag": "0005_add_hidden_shops_exclusion_list",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1794661745695,
+      "tag": "0006_add_station_routes",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794664689656,
+      "tag": "0007_add_station_cafes_database",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1794665846185,
+      "tag": "0008_add_candidate_hours_and_closed_days",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794737768782,
+      "tag": "0009_add_candidate_photo_url",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794742048321,
+      "tag": "0010_add_cafe_location_type_inside_outside",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794805716743,
+      "tag": "0011_add_candidate_map_url",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1794810104600,
+      "tag": "0012_add_shop_feedback_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1794816946746,
+      "tag": "0013_add_genre_and_photo_to_shop_feedback",
+      "breakpoints": true
+    }
+  ]
+}

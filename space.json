@@ -1,0 +1,14 @@
+{
+  "entry": "client/dist/index.html",
+  "managedCronJobs": [
+    {
+      "id": "gourmet-daily-refresh",
+      "action": "refreshSchedule",
+      "schedule": "daily 02:40 Asia/Tokyo"
+    }
+  ],
+  "name": "予定日程付近グルメ",
+  "platformVersion": 28,
+  "runtime": "typescript",
+  "slug": "clander-driven-lifestyle"
+}
